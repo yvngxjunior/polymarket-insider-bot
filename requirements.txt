@@ -1,6 +1,5 @@
 # ── Core async ──────────────────────────────────────────────
 aiohttp>=3.9.0
-asyncio-throttle>=1.0.0
 
 # ── Config & validation ─────────────────────────────────────
 pydantic>=2.0.0
@@ -19,6 +18,10 @@ python-telegram-bot>=20.0
 
 # ── Logging ─────────────────────────────────────────────────
 loguru>=0.7.0
+
+# ── HTTP & Retry ────────────────────────────────────────────
+requests>=2.31.0
+tenacity>=8.0.0
 
 # ── LLM Agent (optionnel — requis si LLM_ENABLED=true) ──────
 openai>=1.0.0
