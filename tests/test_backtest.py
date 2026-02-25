@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bot.analytics.backtest import BacktestEngine, BacktestResult, BacktestTrade
+from bot.analytics.backtest import BacktestEngine, BacktestResult
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ def mock_client(trades_per_wallet: list[dict]) -> AsyncMock:
 
 @pytest.fixture
 def engine_small():
-    """Engine avec capital 1000 USDC et 3 trades gagnants injectés."""
+    """Engine avec capital 1000 USDC et 3 trades injectés."""
     trades = [
         make_trade(price=0.40, usdc_size=200.0, trade_size=100.0),  # gagnant
         make_trade(price=0.35, usdc_size=150.0, trade_size=90.0),   # gagnant
@@ -72,7 +72,6 @@ async def test_run_returns_backtest_result(engine_small):
 async def test_trades_count_matches_resolved(engine_small):
     """Le nombre de trades simulés doit correspondre aux trades REDEEM/SELL."""
     result = await engine_small.run(wallets=["0xWallet1"])
-    # 3 trades injectés, tous de type REDEEM
     assert len(result.trades) == 3
 
 
@@ -80,7 +79,6 @@ async def test_trades_count_matches_resolved(engine_small):
 async def test_winning_trades_increase_pnl(engine_small):
     """Les trades gagnants doivent produire un P&L positif global."""
     result = await engine_small.run(wallets=["0xWallet1"])
-    # 2 gagnants, 1 perdant → P&L global doit être positif
     assert result.total_pnl > 0
 
 
@@ -132,7 +130,7 @@ async def test_small_bets_are_filtered_out():
 async def test_non_resolved_trades_excluded():
     """Les trades de type BUY (non résolus) ne doivent pas être simulés."""
     trades = [
-        make_trade(type_="BUY"),   # pas REDEEM ni SELL → ignoré
+        make_trade(type_="BUY"),    # pas REDEEM ni SELL → ignoré
         make_trade(type_="REDEEM"),
     ]
     engine = BacktestEngine(
@@ -155,7 +153,7 @@ async def test_losing_streak_filters_all_trades():
     engine = BacktestEngine(
         capital=500.0,
         wallet_score=0.75,
-        consecutive_losses=3,   # = seuil de blocage
+        consecutive_losses=3,
         client=mock_client(trades),
     )
     result = await engine.run(wallets=["0xWallet1"])
