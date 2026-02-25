@@ -1,4 +1,3 @@
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.scanner.insider import InsiderScanner
@@ -25,13 +24,12 @@ class WalletRefresher:
         self._scheduler = AsyncIOScheduler()
 
     async def start(self) -> None:
-        """Lance le rafraîchissement immédiatement puis toutes les X minutes."""
         await self._run()
         self._scheduler.add_job(
             self._run,
-            'interval',
+            "interval",
             minutes=self.interval_minutes,
-            id='wallet_refresh',
+            id="wallet_refresh",
         )
         self._scheduler.start()
         logger.info(f"Wallet refresher scheduled every {self.interval_minutes} min.")

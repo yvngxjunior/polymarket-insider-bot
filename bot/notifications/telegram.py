@@ -143,7 +143,7 @@ class TelegramNotifier:
             f"📊 Market: <i>{question}</i>\n"
             f"👥 Insiders: <b>{count} wallets</b> on same side\n"
             f"{side_emoji} Side: <b>{side}</b> @ avg {price:.3f}\n"
-            + (f"💼 Wallets:\n" + "\n".join(
+            + ("💼 Wallets:\n" + "\n".join(
                 f"  • <code>{w[:10]}...</code>"
                 for w in wallets[:5]
             ) if wallets else "")
@@ -165,8 +165,8 @@ class TelegramNotifier:
             f"📊 Market: <i>{opp.poly_question[:70]}</i>\n"
             f"💰 Profit: <b>+{opp.profit_pct:.1%}</b> risk-free\n"
             f"📋 Strategy: {direction_label}\n"
-            f"🏛 Poly YES: <b>{opp.poly_yes_price:.3f}</b>\n"
-            f"🏛 Kalshi YES: <b>{opp.kalshi_yes_price:.3f}</b>\n"
+            f"🏗 Poly YES: <b>{opp.poly_yes_price:.3f}</b>\n"
+            f"🏗 Kalshi YES: <b>{opp.kalshi_yes_price:.3f}</b>\n"
             f"💵 Min capital: <b>${opp.min_capital_usdc:.0f} USDC</b>\n"
         )
         await self.send(msg)

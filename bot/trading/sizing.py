@@ -1,13 +1,9 @@
 """
-Position Sizer — inspiré de dexorynlabs/polymarket-trading-bot-python
+Position Sizer — Kelly fractionnaire standalone.
+Utilisé pour les signaux LLM et arbitrage.
 
-Calcule la taille de position optimale via Kelly fractionnaire.
-Utilisé comme calculateur standalone pour les signaux LLM et arbitrage
-(le RiskManager interne du TradingEngine gère déjà Kelly pour le copy trading).
-
-Formule Kelly:
-  f* = (p * (b+1) - 1) / b
-  où p = win_rate estimé, b = (1-price)/price (odds nettes)
+Formule Kelly: f* = (p * (b+1) - 1) / b
+  où p = win_rate estimé, b = (1-price)/price
   On applique Quarter-Kelly (f* * 0.25) pour limiter la variance.
 """
 from dataclasses import dataclass
@@ -27,21 +23,13 @@ class SizeResult:
 
 
 class PositionSizer:
-    """
-    Calculateur Kelly standalone.
-    Peut être utilisé indépendamment du TradingEngine pour estimer
-    la taille optimale d'un trade avant de l'envoyer au moteur.
-    """
-
-    KELLY_FRACTION = 0.25    # Quarter-Kelly (conservateur)
-    MIN_TRADE_USDC = 2.0     # Minimum absolu pour éviter les micro-trades
+    KELLY_FRACTION = 0.25
+    MIN_TRADE_USDC = 2.0
 
     def __init__(self, capital_usdc: float = 0.0) -> None:
-        # Capital de référence — peut être mis à jour dynamiquement
         self._capital = capital_usdc if capital_usdc > 0 else settings.max_trade_amount * 10
 
     def update_capital(self, capital_usdc: float) -> None:
-        """Met à jour le capital de référence (appeler après chaque trade clôturé)."""
         if capital_usdc > 0:
             self._capital = capital_usdc
 
@@ -51,18 +39,6 @@ class PositionSizer:
         conviction_score: float,
         source_amount: float = 0.0,
     ) -> SizeResult:
-        """
-        Calcule la taille de position optimale.
-
-        Args:
-            yes_price:        Prix du token YES (0.01 - 0.99)
-            conviction_score: Score de confiance 0.0-1.0
-                              (win_rate insider OU confidence LLM)
-            source_amount:    Montant du trade source (pour calcul du ratio)
-
-        Returns:
-            SizeResult avec amount_usdc capped sur max_trade_amount
-        """
         if not (0.01 <= yes_price <= 0.99):
             return SizeResult(
                 amount_usdc=self.MIN_TRADE_USDC,
@@ -72,13 +48,10 @@ class PositionSizer:
             )
 
         p = max(0.01, min(0.99, conviction_score))
-        q = 1.0 - p
-        b = (1.0 - yes_price) / yes_price  # odds nettes
+        b = (1.0 - yes_price) / yes_price
 
         full_kelly = (p * (b + 1) - 1) / b if b > 0 else 0.0
         fraction = max(0.0, full_kelly * self.KELLY_FRACTION)
-
-        # Cap sur max_position_pct du capital
         fraction = min(fraction, settings.max_position_pct)
 
         kelly_amount = self._capital * fraction
