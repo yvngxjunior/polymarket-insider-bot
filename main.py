@@ -1,16 +1,18 @@
 """
-PolyInsider Bot v2.0
+PolyInsider Bot v2.1
 =====================
-Architecture 7 phases:
+Architecture 7 phases + Exit Manager background:
   1. Whale scan         — baleines sur nouveaux marchés
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
-  4. Arbitrage scan     — opportunités Polymarket vs Kalshi  [périodique]
-  5. Market scan        — 5000+ marchés, arb interne        [périodique]
-  6. LLM analysis       — GPT-4o-mini + RAG actualités      [périodique, optionnel]
-  7. Performance report — win rate / PnL / trades           [périodique]
+  4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
+  5. Market scan        — 5 000+ marchés arb interne       [périodique]
+  6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
+  7. Performance report — win rate / PnL / trades          [périodique]
+  8. Exit Manager       — TP / SL / durée max              [background continu]
 """
 import asyncio
+import signal
 
 import aiohttp
 
@@ -28,6 +30,7 @@ from bot.trading.risk import RiskManager
 from bot.trading.position_manager import PositionManager
 from bot.trading.sizing import PositionSizer
 from bot.trading.filters import ConvictionFilter
+from bot.trading.exit_manager import ExitManager
 from bot.notifications.telegram import TelegramNotifier
 from bot.analytics.performance import PerformanceTracker
 from bot.ai.llm_agent import LLMAgent
@@ -36,9 +39,9 @@ from bot.utils.logger import logger
 settings = get_settings()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trade processing
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Trade processing pipeline
+# ────────────────────────────────────────────────────────────────────────────
 
 async def process_new_trade(
     trade: dict,
@@ -54,16 +57,16 @@ async def process_new_trade(
     sizer: PositionSizer,
 ) -> None:
     """Pipeline complet de traitement d'un trade insider détecté."""
-    token_id = trade.get("asset", "")
-    price = float(trade.get("price", 0))
-    amount = float(trade.get("usdcSize", 0))
-    side = trade.get("side", "BUY").upper()
+    token_id     = trade.get("asset", "")
+    price        = float(trade.get("price", 0))
+    amount       = float(trade.get("usdcSize", 0))
+    side         = trade.get("side", "BUY").upper()
     condition_id = trade.get("conditionId", "")
 
     if not token_id or price <= 0 or amount <= 0:
         return
 
-    # ── Étape 1 : Filtre de conviction (fast, synchrone) ─────────────────
+    # Étape 1 — Filtre de conviction (fast, synchrone)
     f = conv_filter.evaluate(
         source_amount=amount,
         price=price,
@@ -73,7 +76,7 @@ async def process_new_trade(
     if not f.passed:
         return
 
-    # ── Étape 2 : Risk check (synchrone, Kelly sizing) ───────────────────
+    # Étape 2 — Risk check + Kelly sizing (synchrone)
     decision = risk_manager.evaluate(
         token_id=token_id,
         price=price,
@@ -84,30 +87,23 @@ async def process_new_trade(
         logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
         return
 
-    # ── Étape 3 : Position déjà ouverte ? ───────────────────────────────
+    # Étape 3 — Position déjà ouverte ?
     try:
-        already_open = await position_manager.has_open_position(
-            token_id=token_id, side=side
-        )
-        if already_open:
+        if await position_manager.has_open_position(token_id=token_id, side=side):
             logger.debug(f"[POS] Already open: {token_id[:8]}")
             return
     except Exception:
-        pass  # PositionManager optionnel — dégrade gracieusement
+        pass
 
-    # ── Étape 4 : Récupère les infos du marché ───────────────────────────
+    # Étape 4 — Infos du marché
     market_info = await client.get_market_info(condition_id) if condition_id else None
-    question = market_info.get("question", "") if market_info else ""
+    question    = market_info.get("question", "") if market_info else ""
 
-    # ── Étape 5 : Sizing Kelly standalone (pour log / audit) ────────────
-    size = sizer.calculate(
-        yes_price=price,
-        conviction_score=f.score,
-        source_amount=amount,
-    )
+    # Étape 5 — Sizing Kelly standalone (pour log / audit)
+    size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
 
-    # ── Étape 6 : Exécution (engine gère son propre Kelly interne) ───────
+    # Étape 6 — Exécution (engine gère son propre Kelly interne)
     copied_trade = await engine.copy_trade(
         source_wallet=wallet_address,
         token_id=token_id,
@@ -130,9 +126,9 @@ async def process_new_trade(
         await notifier.notify_trade(copied_trade, market_question=question)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main loop
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Main loop (7 phases)
+# ────────────────────────────────────────────────────────────────────────────
 
 async def main_loop(
     scanner: InsiderScanner,
@@ -150,58 +146,48 @@ async def main_loop(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
 ) -> None:
-    """Boucle principale — architecture 7 phases."""
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
-    ARB_EVERY = 20
+    ARB_EVERY    = 20
     MARKET_EVERY = settings.market_scan_every_n_loops
-    LLM_EVERY = settings.llm_scan_every_n_loops
-    PERF_EVERY = 10
-
-    loop_count = 0
+    LLM_EVERY    = settings.llm_scan_every_n_loops
+    PERF_EVERY   = 10
+    loop_count   = 0
 
     while True:
         try:
             loop_count += 1
 
-            # ── Phase 1 : Whale scan ─────────────────────────────────────
-            whale_events = await whale_tracker.scan()
-            for event in whale_events:
+            # Phase 1 — Whale scan
+            for event in await whale_tracker.scan():
                 mi = await client.get_market_info(event["condition_id"])
-                q = mi.get("question", "") if mi else ""
                 await notifier.notify_whale_event(
                     wallet=event["wallet"],
                     amount_usdc=event["amount_usdc"],
-                    market_question=q,
+                    market_question=mi.get("question", "") if mi else "",
                     side=event["side"],
                     price=event["price"],
                 )
 
-            # ── Phase 2 : Convergence scan ───────────────────────────────
-            conv_signals = await convergence_scanner.scan()
-            for sig in conv_signals:
+            # Phase 2 — Convergence scan
+            for sig in await convergence_scanner.scan():
                 logger.info(
-                    f"[CONV] {sig.get('count', 0)} insiders → "
-                    f"{sig.get('question', '')[:60]}"
+                    f"[CONV] {sig.get('count', 0)} insiders → {sig.get('question', '')[:60]}"
                 )
-                if hasattr(notifier, "notify_convergence"):
-                    await notifier.notify_convergence(sig)
+                await notifier.notify_convergence(sig)
 
-            # ── Phase 3 : Insider copy trading ──────────────────────────
+            # Phase 3 — Insider copy trading
             with get_db() as db:
-                active_wallets = (
+                wallets = (
                     db.query(TrackedWallet)
-                    .filter(TrackedWallet.is_active == True)
+                    .filter(TrackedWallet.is_active == True)  # noqa: E712
                     .order_by(TrackedWallet.score.desc())
                     .all()
                 )
-                wallet_data = [
-                    (w.address, float(w.score or 0.70))
-                    for w in active_wallets
-                ]
+                wallet_data = [(w.address, float(w.score or 0.70)) for w in wallets]
 
             if not wallet_data:
-                logger.debug("No active wallets yet — waiting for refresher...")
+                logger.debug("No active wallets — waiting for refresher...")
                 await asyncio.sleep(settings.scan_interval)
                 continue
 
@@ -209,51 +195,36 @@ async def main_loop(
                 *[scanner.get_new_trades(addr) for addr, _ in wallet_data],
                 return_exceptions=True,
             )
-
-            for (wallet_addr, wallet_score), new_trades in zip(wallet_data, all_trades):
-                if isinstance(new_trades, Exception):
-                    logger.warning(f"Scan error {wallet_addr[:8]}...: {new_trades}")
+            for (addr, score), trades in zip(wallet_data, all_trades):
+                if isinstance(trades, Exception):
+                    logger.warning(f"Scan error {addr[:8]}: {trades}")
                     continue
-                for trade in new_trades:
+                for trade in trades:
                     await process_new_trade(
-                        trade=trade,
-                        wallet_address=wallet_addr,
-                        wallet_score=wallet_score,
-                        engine=engine,
-                        notifier=notifier,
-                        client=client,
-                        risk_manager=risk_manager,
-                        position_manager=position_manager,
+                        trade=trade, wallet_address=addr, wallet_score=score,
+                        engine=engine, notifier=notifier, client=client,
+                        risk_manager=risk_manager, position_manager=position_manager,
                         performance_tracker=performance_tracker,
-                        conv_filter=conv_filter,
-                        sizer=sizer,
+                        conv_filter=conv_filter, sizer=sizer,
                     )
 
-            # ── Phase 4 : Arbitrage cross-platform ──────────────────────
+            # Phase 4 — Arbitrage cross-platform
             if loop_count % ARB_EVERY == 0:
-                arb_opps = await arbitrage_scanner.scan()
-                for opp in arb_opps[:5]:  # Top 5 uniquement
-                    logger.info(
-                        f"[ARB] +{opp.profit_pct:.1%} | {opp.direction} | "
-                        f"{opp.poly_question[:45]}..."
-                    )
-                    if hasattr(notifier, "notify_arbitrage"):
-                        await notifier.notify_arbitrage(opp)
+                for opp in (await arbitrage_scanner.scan())[:5]:
+                    logger.info(f"[ARB] +{opp.profit_pct:.1%} | {opp.direction} | {opp.poly_question[:45]}")
+                    await notifier.notify_arbitrage(opp)
 
-            # ── Phase 5 : Market scan haute échelle ──────────────────────
+            # Phase 5 — Market scan haute échelle
             if loop_count % MARKET_EVERY == 0:
-                signals = await market_scanner.scan_all(
-                    max_markets=settings.market_scan_max_markets
-                )
-                internal_arbs = [s for s in signals if s.signal_type == "INTERNAL_ARB"]
-                if internal_arbs:
+                sigs = await market_scanner.scan_all(max_markets=settings.market_scan_max_markets)
+                arbs = [s for s in sigs if s.signal_type == "INTERNAL_ARB"]
+                if arbs:
                     logger.info(
-                        f"[SCANNER] {len(internal_arbs)} internal arb signals — "
-                        f"top: {internal_arbs[0].question[:50]} "
-                        f"(spread={internal_arbs[0].spread:.3f})"
+                        f"[SCANNER] {len(arbs)} internal arb — top: "
+                        f"{arbs[0].question[:50]} (spread={arbs[0].spread:.3f})"
                     )
 
-            # ── Phase 6 : LLM analysis (si activé) ──────────────────────
+            # Phase 6 — LLM analysis
             if loop_count % LLM_EVERY == 0 and llm_agent.is_enabled():
                 try:
                     async with aiohttp.ClientSession(
@@ -262,36 +233,28 @@ async def main_loop(
                         async with session.get(
                             f"{settings.polymarket_gamma_host}/markets",
                             params={
-                                "active": "true",
-                                "closed": "false",
+                                "active": "true", "closed": "false",
                                 "limit": settings.llm_top_markets * 4,
                             },
                         ) as resp:
                             if resp.status == 200:
                                 hot = await resp.json()
                                 if isinstance(hot, list):
-                                    llm_signals = await llm_agent.batch_analyze(
-                                        hot, top_n=settings.llm_top_markets
-                                    )
-                                    for sig in llm_signals:
+                                    for sig in await llm_agent.batch_analyze(hot, top_n=settings.llm_top_markets):
                                         logger.info(
-                                            f"[LLM] {sig.recommendation} "
-                                            f"'{sig.question[:45]}' "
-                                            f"conf={sig.confidence:.0%} "
-                                            f"misprice={sig.mispricing_pct:.1%}"
+                                            f"[LLM] {sig.recommendation} '{sig.question[:45]}' "
+                                            f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
                                         )
-                                        if hasattr(notifier, "notify_llm_signal"):
-                                            await notifier.notify_llm_signal(sig)
+                                        await notifier.notify_llm_signal(sig)
                 except Exception as e:
                     logger.debug(f"[LLM] Scan cycle error: {e}")
 
-            # ── Phase 7 : Performance report ─────────────────────────────
+            # Phase 7 — Performance report
             if loop_count % PERF_EVERY == 0:
                 try:
                     stats = await performance_tracker.get_summary()
                     logger.info(
-                        f"[PERF] "
-                        f"WR={stats.get('win_rate', 0):.1%} | "
+                        f"[PERF] WR={stats.get('win_rate', 0):.1%} | "
                         f"PnL={stats.get('total_pnl_usdc', 0):+.2f} USDC | "
                         f"Trades={stats.get('total_trades', 0)} | "
                         f"Open={len(risk_manager._open_positions)}"
@@ -307,18 +270,18 @@ async def main_loop(
         await asyncio.sleep(settings.scan_interval)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 
 async def run() -> None:
-    """Point d'entrée principal — PolyInsider Bot v2.0."""
+    """Point d'entrée principal — PolyInsider Bot v2.1."""
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.0")
-    logger.info("  Copy · Whale · Convergence · Arbitrage · Scanner · LLM")
-    logger.info(f"  Mode: {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
-    logger.info(f"  LLM:  {'ENABLED 🤖' if settings.llm_enabled else 'disabled'}")
-    logger.info(f"  Arb:  {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
+    logger.info("  PolyInsider Bot v2.1")
+    logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
+    logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
+    logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
+    logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
     logger.info("=" * 62)
 
     init_db()
@@ -326,59 +289,71 @@ async def run() -> None:
     # Instanciation de tous les modules
     client              = PolymarketDataClient()
     notifier            = TelegramNotifier()
+    risk_manager        = RiskManager()
     scanner             = InsiderScanner(client=client)
     whale_tracker       = WhaleTracker(client=client)
     convergence_scanner = ConvergenceScanner(client=client)
-    arbitrage_scanner   = ArbitrageScanner(
-        min_profit_pct=settings.arb_min_profit_pct
-    )
+    arbitrage_scanner   = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner      = MarketScanner(max_concurrent=8)
     llm_agent           = LLMAgent()
-    risk_manager        = RiskManager()
     position_manager    = PositionManager()
     performance_tracker = PerformanceTracker()
     conv_filter         = ConvictionFilter()
     sizer               = PositionSizer()
     engine              = TradingEngine()
+    exit_manager        = ExitManager(risk_manager=risk_manager, notifier=notifier)
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
-    # WalletRefresher en background (toutes les 60 min)
-    refresher = WalletRefresher(
-        scanner=scanner,
-        notifier=notifier,
-        interval_minutes=60,
-    )
-    await refresher.start()
+    # Graceful shutdown — capte SIGTERM (Docker stop) + SIGINT (Ctrl+C)
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
 
-    try:
-        await main_loop(
-            scanner=scanner,
-            whale_tracker=whale_tracker,
+    def _handle_signal() -> None:
+        logger.info("Shutdown signal received — stopping gracefully...")
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _handle_signal)
+
+    # Lance les tâches background
+    refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
+    await refresher.start()
+    await exit_manager.start()
+
+    # Boucle principale
+    main_task = asyncio.create_task(
+        main_loop(
+            scanner=scanner, whale_tracker=whale_tracker,
             convergence_scanner=convergence_scanner,
-            arbitrage_scanner=arbitrage_scanner,
-            market_scanner=market_scanner,
-            llm_agent=llm_agent,
-            engine=engine,
-            notifier=notifier,
-            client=client,
-            risk_manager=risk_manager,
-            position_manager=position_manager,
-            performance_tracker=performance_tracker,
-            conv_filter=conv_filter,
+            arbitrage_scanner=arbitrage_scanner, market_scanner=market_scanner,
+            llm_agent=llm_agent, engine=engine, notifier=notifier, client=client,
+            risk_manager=risk_manager, position_manager=position_manager,
+            performance_tracker=performance_tracker, conv_filter=conv_filter,
             sizer=sizer,
         )
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    finally:
-        await asyncio.gather(
-            client.close(),
-            arbitrage_scanner.close(),
-            market_scanner.close(),
-            llm_agent.close(),
-            return_exceptions=True,
-        )
-        logger.info("Cleanup done. Bye!")
+    )
+
+    # Attend le signal de shutdown
+    await stop_event.wait()
+    main_task.cancel()
+
+    try:
+        await main_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cleanup
+    await asyncio.gather(
+        exit_manager.stop(),
+        client.close(),
+        arbitrage_scanner.close(),
+        market_scanner.close(),
+        llm_agent.close(),
+        return_exceptions=True,
+    )
+    await notifier.send("🛑 <b>PolyInsider Bot stopped.</b>")
+    logger.info("Cleanup done. Goodbye!")
 
 
 if __name__ == "__main__":

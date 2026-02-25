@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio ruff
+
+      - name: Lint with ruff
+        run: ruff check bot/ tests/ main.py --ignore E501,E711,E712
+
+      - name: Run tests
+        env:
+          DATABASE_URL: sqlite:///./test.db
+          PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+          PROXY_WALLET: "0x0000000000000000000000000000000000000001"
+          TELEGRAM_BOT_TOKEN: "0000000000:test"
+          TELEGRAM_CHAT_ID: "123456"
+        run: pytest tests/ -v --tb=short
