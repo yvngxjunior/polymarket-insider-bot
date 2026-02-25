@@ -16,10 +16,10 @@ settings = get_settings()
 
 class TradingEngine:
     """
-    Exécute les trades copiés sur Polymarket via le CLOB.
+    Exécute les trades sur Polymarket via le CLOB.
 
-    En mode DRY_RUN=True: les trades sont simulés et loggués uniquement.
-    En mode DRY_RUN=False: les ordres sont signés et envoyés sur la chain.
+    DRY_RUN=True  → simulation uniquement (log + DB)
+    DRY_RUN=False → ordres signés et envoyés sur Polygon
     """
 
     def __init__(self):
@@ -27,7 +27,6 @@ class TradingEngine:
         self._client: Optional[ClobClient] = None
 
     def _get_client(self) -> ClobClient:
-        """Initialise le client CLOB une seule fois (lazy)."""
         if self._client is None:
             self._client = ClobClient(
                 host=settings.polymarket_host,
@@ -38,6 +37,9 @@ class TradingEngine:
             )
         return self._client
 
+    # ------------------------------------------------------------------
+    # Ouvrir une position (copy trade)
+    # ------------------------------------------------------------------
     async def copy_trade(
         self,
         source_wallet: str,
@@ -50,9 +52,7 @@ class TradingEngine:
     ) -> Optional[CopiedTrade]:
         """
         Tente de copier un trade détecté.
-
-        Returns:
-            CopiedTrade avec le statut final (EXECUTED / SKIPPED / FAILED)
+        Retourne un CopiedTrade avec le statut final.
         """
         decision: TradeDecision = self.risk.evaluate(
             token_id=token_id,
@@ -92,11 +92,10 @@ class TradingEngine:
             self._save_trade(trade_record)
             return trade_record
 
-        # -- LIVE MODE --
+        # ── LIVE MODE ──
         try:
             client = self._get_client()
             side_const = BUY if side.upper() == "BUY" else SELL
-
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=decision.amount_usdc,
@@ -126,8 +125,68 @@ class TradingEngine:
         self._save_trade(trade_record)
         return trade_record
 
+    # ------------------------------------------------------------------
+    # Fermer une position (SELL) — appelé par ExitManager
+    # ------------------------------------------------------------------
+    async def close_position(
+        self,
+        token_id: str,
+        entry_price: float,
+        amount_usdc: float,
+        market_question: str = "",
+    ) -> bool:
+        """
+        Envoie un ordre SELL au marché pour fermer une position.
+
+        En DRY RUN : simulé, retourne True.
+        En LIVE    : ordre signé envoyé au CLOB Polymarket sur Polygon.
+
+        Args:
+            token_id:       Token Polymarket à vendre
+            entry_price:    Prix d'entrée (utilisé pour calculer les shares)
+            amount_usdc:    Montant USDC investi à l'achat
+            market_question: Label du marché pour les logs
+
+        Returns:
+            True si l'ordre a été envoyé (ou simulé) avec succès.
+        """
+        # Nombre de shares achetées à l'entrée
+        shares_to_sell = round(amount_usdc / entry_price, 4) if entry_price > 0 else 0
+        label = market_question[:40] or token_id[:20]
+
+        if settings.dry_run:
+            logger.info(
+                f"🟡 [DRY RUN] Would SELL {shares_to_sell} shares "
+                f"(~${amount_usdc:.2f}) on {label}..."
+            )
+            return True
+
+        # ── LIVE SELL ──
+        try:
+            client = self._get_client()
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=shares_to_sell,
+                side=SELL,
+            )
+            signed_order = client.create_market_order(order_args)
+            response = client.post_order(signed_order)
+
+            tx_hash = response.get("orderID", "")
+            logger.success(
+                f"✅ Position CLOSED: SELL {shares_to_sell} shares "
+                f"on {label}... | TX: {tx_hash[:12]}..."
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"close_position FAILED: {e} | token={token_id[:20]}...")
+            return False
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def _save_trade(self, trade: CopiedTrade) -> None:
-        """Persiste le trade en base de données."""
         try:
             with get_db() as db:
                 db.add(trade)

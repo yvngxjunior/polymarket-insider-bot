@@ -1,7 +1,7 @@
 """
 PolyInsider Bot v2.1
 =====================
-Architecture 7 phases + Exit Manager background:
+Architecture 7 phases + 2 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
@@ -9,7 +9,8 @@ Architecture 7 phases + Exit Manager background:
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
   7. Performance report — win rate / PnL / trades          [périodique]
-  8. Exit Manager       — TP / SL / durée max              [background continu]
+  └ WalletRefresher    — refresh wallets insiders          [background, 60min]
+  └ ExitManager        — TP / SL / durée max              [background, 60s]
 """
 import asyncio
 import signal
@@ -56,7 +57,6 @@ async def process_new_trade(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
 ) -> None:
-    """Pipeline complet de traitement d'un trade insider détecté."""
     token_id     = trade.get("asset", "")
     price        = float(trade.get("price", 0))
     amount       = float(trade.get("usdcSize", 0))
@@ -66,22 +66,18 @@ async def process_new_trade(
     if not token_id or price <= 0 or amount <= 0:
         return
 
-    # Étape 1 — Filtre de conviction (fast, synchrone)
+    # Étape 1 — Filtre de conviction
     f = conv_filter.evaluate(
-        source_amount=amount,
-        price=price,
-        wallet_score=wallet_score,
-        market_id=condition_id,
+        source_amount=amount, price=price,
+        wallet_score=wallet_score, market_id=condition_id,
     )
     if not f.passed:
         return
 
-    # Étape 2 — Risk check + Kelly sizing (synchrone)
+    # Étape 2 — Risk check (Kelly sizing)
     decision = risk_manager.evaluate(
-        token_id=token_id,
-        price=price,
-        source_amount=amount,
-        wallet_win_rate=wallet_score,
+        token_id=token_id, price=price,
+        source_amount=amount, wallet_win_rate=wallet_score,
     )
     if not decision.approved:
         logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
@@ -99,19 +95,15 @@ async def process_new_trade(
     market_info = await client.get_market_info(condition_id) if condition_id else None
     question    = market_info.get("question", "") if market_info else ""
 
-    # Étape 5 — Sizing Kelly standalone (pour log / audit)
+    # Étape 5 — Sizing Kelly standalone (audit / log)
     size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
 
-    # Étape 6 — Exécution (engine gère son propre Kelly interne)
+    # Étape 6 — Exécution
     copied_trade = await engine.copy_trade(
-        source_wallet=wallet_address,
-        token_id=token_id,
-        side=side,
-        price=price,
-        source_amount=size.amount_usdc,
-        market_question=question,
-        market_id=condition_id,
+        source_wallet=wallet_address, token_id=token_id,
+        side=side, price=price, source_amount=size.amount_usdc,
+        market_question=question, market_id=condition_id,
     )
 
     if copied_trade:
@@ -171,14 +163,12 @@ async def main_loop(
 
             # Phase 2 — Convergence scan
             for sig in await convergence_scanner.scan():
-                logger.info(
-                    f"[CONV] {sig.get('count', 0)} insiders → {sig.get('question', '')[:60]}"
-                )
+                logger.info(f"[CONV] {sig.get('count', 0)} insiders → {sig.get('question', '')[:60]}")
                 await notifier.notify_convergence(sig)
 
             # Phase 3 — Insider copy trading
             with get_db() as db:
-                wallets = (
+                wallets    = (
                     db.query(TrackedWallet)
                     .filter(TrackedWallet.is_active == True)  # noqa: E712
                     .order_by(TrackedWallet.score.desc())
@@ -242,7 +232,7 @@ async def main_loop(
                                 if isinstance(hot, list):
                                     for sig in await llm_agent.batch_analyze(hot, top_n=settings.llm_top_markets):
                                         logger.info(
-                                            f"[LLM] {sig.recommendation} '{sig.question[:45]}' "
+                                            f"[LLM] {sig.recommendation} ‘{sig.question[:45]}’ "
                                             f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
                                         )
                                         await notifier.notify_llm_signal(sig)
@@ -275,7 +265,6 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 
 async def run() -> None:
-    """Point d'entrée principal — PolyInsider Bot v2.1."""
     logger.info("=" * 62)
     logger.info("  PolyInsider Bot v2.1")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
@@ -286,10 +275,11 @@ async def run() -> None:
 
     init_db()
 
-    # Instanciation de tous les modules
+    # ── Instanciation de tous les modules ──
     client              = PolymarketDataClient()
     notifier            = TelegramNotifier()
     risk_manager        = RiskManager()
+    engine              = TradingEngine()
     scanner             = InsiderScanner(client=client)
     whale_tracker       = WhaleTracker(client=client)
     convergence_scanner = ConvergenceScanner(client=client)
@@ -300,28 +290,31 @@ async def run() -> None:
     performance_tracker = PerformanceTracker()
     conv_filter         = ConvictionFilter()
     sizer               = PositionSizer()
-    engine              = TradingEngine()
-    exit_manager        = ExitManager(risk_manager=risk_manager, notifier=notifier)
+    exit_manager        = ExitManager(
+        risk_manager=risk_manager,
+        notifier=notifier,
+        engine=engine,          # ← passé ici pour les ordres SELL LIVE
+    )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
-    # Graceful shutdown — capte SIGTERM (Docker stop) + SIGINT (Ctrl+C)
+    # ── Graceful shutdown (SIGTERM Docker + SIGINT Ctrl+C) ──
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
-    def _handle_signal() -> None:
+    def _on_signal() -> None:
         logger.info("Shutdown signal received — stopping gracefully...")
         stop_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _handle_signal)
+        loop.add_signal_handler(sig, _on_signal)
 
-    # Lance les tâches background
+    # ── Background tasks ──
     refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
     await refresher.start()
     await exit_manager.start()
 
-    # Boucle principale
+    # ── Boucle principale ──
     main_task = asyncio.create_task(
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
@@ -329,21 +322,19 @@ async def run() -> None:
             arbitrage_scanner=arbitrage_scanner, market_scanner=market_scanner,
             llm_agent=llm_agent, engine=engine, notifier=notifier, client=client,
             risk_manager=risk_manager, position_manager=position_manager,
-            performance_tracker=performance_tracker, conv_filter=conv_filter,
-            sizer=sizer,
+            performance_tracker=performance_tracker,
+            conv_filter=conv_filter, sizer=sizer,
         )
     )
 
-    # Attend le signal de shutdown
     await stop_event.wait()
     main_task.cancel()
-
     try:
         await main_task
     except asyncio.CancelledError:
         pass
 
-    # Cleanup
+    # ── Cleanup ──
     await asyncio.gather(
         exit_manager.stop(),
         client.close(),
