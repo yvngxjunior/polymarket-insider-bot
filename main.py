@@ -1,1 +1,385 @@
-aW1wb3J0IGFzeW5jaW8KZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKCmZyb20gYm90LmNvbmZpZyBpbXBvcnQgZ2V0X3NldHRpbmdzCmZyb20gYm90LmRhdGFiYXNlIGltcG9ydCBnZXRfZGIsIFRyYWNrZWRXYWxsZXQsIGluaXRfZGIKZnJvbSBib3QudHJhZGluZy5wb2x5bWFya2V0IGltcG9ydCBQb2x5bWFya2V0RGF0YUNsaWVudApmcm9tIGJvdC5zY2FubmVyLmluc2lkZXIgaW1wb3J0IEluc2lkZXJTY2FubmVyCmZyb20gYm90LnNjYW5uZXIud2hhbGUgaW1wb3J0IFdoYWxlVHJhY2tlcgpmcm9tIGJvdC5zY2FubmVyLndhbGxldF9yZWZyZXNoZXIgaW1wb3J0IFdhbGxldFJlZnJlc2hlcgpmcm9tIGJvdC5zY2FubmVyLmNvbnZlcmdlbmNlIGltcG9ydCBDb252ZXJnZW5jZVNjYW5uZXIKZnJvbSBib3QudHJhZGluZy5lbmdpbmUgaW1wb3J0IFRyYWRpbmdFbmdpbmUKZnJvbSBib3QudHJhZGluZy5yaXNrIGltcG9ydCBSaXNrTWFuYWdlcgpmcm9tIGJvdC50cmFkaW5nLnBvc2l0aW9uX21hbmFnZXIgaW1wb3J0IFBvc2l0aW9uTWFuYWdlcgpmcm9tIGJvdC5ub3RpZmljYXRpb25zLnRlbGVncmFtIGltcG9ydCBUZWxlZ3JhbU5vdGlmaWVyCmZyb20gYm90LmFuYWx5dGljcy5wZXJmb3JtYW5jZSBpbXBvcnQgUGVyZm9ybWFuY2VUcmFja2VyCmZyb20gYm90LnV0aWxzLmxvZ2dlciBpbXBvcnQgbG9nZ2VyCgpzZXR0aW5ncyA9IGdldF9zZXR0aW5ncygpCgoKYXN5bmMgZGVmIHByb2Nlc3NfbmV3X3RyYWRlKAogICAgdHJhZGU6IGRpY3QsCiAgICB3YWxsZXRfYWRkcmVzczogc3RyLAogICAgZW5naW5lOiBUcmFkaW5nRW5naW5lLAogICAgbm90aWZpZXI6IFRlbGVncmFtTm90aWZpZXIsCiAgICBjbGllbnQ6IFBvbHltYXJrZXREYXRhQ2xpZW50LAogICAgcmlza19tYW5hZ2VyOiBSaXNrTWFuYWdlciwKICAgIHBvc2l0aW9uX21hbmFnZXI6IFBvc2l0aW9uTWFuYWdlciwKICAgIHBlcmZvcm1hbmNlX3RyYWNrZXI6IFBlcmZvcm1hbmNlVHJhY2tlciwKKSAtPiBOb25lOgogICAgIiIiVHJhaXRlIHVuIG5vdXZlYXUgdHJhZGUgZMOpdGVjdMOpIHN1ciB1biB3YWxsZXQgaW5zaWRlci4iIiIKICAgIHRva2VuX2lkID0gdHJhZGUuZ2V0KCJhc3NldCIsICIiKQogICAgcHJpY2UgPSBmbG9hdCh0cmFkZS5nZXQoInByaWNlIiwgMCkpCiAgICBhbW91bnQgPSBmbG9hdCh0cmFkZS5nZXQoInVzZGNTaXplIiwgMCkpCiAgICBzaWRlID0gdHJhZGUuZ2V0KCJzaWRlIiwgIkJVWSIpLnVwcGVyKCkKICAgIGNvbmRpdGlvbl9pZCA9IHRyYWRlLmdldCgiY29uZGl0aW9uSWQiLCAiIikKCiAgICBpZiBub3QgdG9rZW5faWQgb3IgcHJpY2UgPD0gMCBvciBhbW91bnQgPD0gMDoKICAgICAgICByZXR1cm4KCiAgICAjIFbDqXJpZmllIGxlIHJpc3F1ZSBhdmFudCBkJ2V4w6ljdXRlcgogICAgcmlza19vayA9IGF3YWl0IHJpc2tfbWFuYWdlci5jaGVjaygKICAgICAgICB0b2tlbl9pZD10b2tlbl9pZCwKICAgICAgICBzaWRlPXNpZGUsCiAgICAgICAgcHJpY2U9cHJpY2UsCiAgICAgICAgYW1vdW50PWFtb3VudCwKICAgICkKICAgIGlmIG5vdCByaXNrX29rOgogICAgICAgIGxvZ2dlci53YXJuaW5nKGYiUmlzayBjaGVjayBmYWlsZWQgZm9yIHRva2VuIHt0b2tlbl9pZFs6OF19Li4uIOKAlCB0cmFkZSBza2lwcGVkLiIpCiAgICAgICAgcmV0dXJuCgogICAgIyBWw6lyaWZpZSBzaSB1bmUgcG9zaXRpb24gZXhpc3RlIGTDqWrDoAogICAgYWxyZWFkeV9vcGVuID0gYXdhaXQgcG9zaXRpb25fbWFuYWdlci5oYXNfb3Blbl9wb3NpdGlvbigKICAgICAgICB0b2tlbl9pZD10b2tlbl9pZCwgc2lkZT1zaWRlCiAgICApCiAgICBpZiBhbHJlYWR5X29wZW46CiAgICAgICAgbG9nZ2VyLmRlYnVnKGYiUG9zaXRpb24gYWxyZWFkeSBvcGVuIGZvciB7dG9rZW5faWRbOjhdfS4uLiDihJAgc2tpcHBpbmcuIikKICAgICAgICByZXR1cm4KCiAgICAjIFLDqWN1cMOocmUgbGVzIGluZm9zIGR1IG1hcmNow6kKICAgIG1hcmtldF9pbmZvID0gYXdhaXQgY2xpZW50LmdldF9tYXJrZXRfaW5mbyhjb25kaXRpb25faWQpIGlmIGNvbmRpdGlvbl9pZCBlbHNlIE5vbmUKICAgIHF1ZXN0aW9uID0gbWFya2V0X2luZm8uZ2V0KCJxdWVzdGlvbiIsICIiKSBpZiBtYXJrZXRfaW5mbyBlbHNlICIiCgogICAgY29waWVkX3RyYWRlID0gYXdhaXQgZW5naW5lLmNvcHlfdHJhZGUoCiAgICAgICAgc291cmNlX3dhbGxldD13YWxsZXRfYWRkcmVzcywKICAgICAgICB0b2tlbl9pZD10b2tlbl9pZCwKICAgICAgICBzaWRlPXNpZGUsCiAgICAgICAgcHJpY2U9cHJpY2UsCiAgICAgICAgc291cmNlX2Ftb3VudD1hbW91bnQsCiAgICAgICAgbWFya2V0X3F1ZXN0aW9uPXF1ZXN0aW9uLAogICAgICAgIG1hcmtldF9pZD1jb25kaXRpb25faWQsCiAgICApCgogICAgaWYgY29waWVkX3RyYWRlOgogICAgICAgIGF3YWl0IHBvc2l0aW9uX21hbmFnZXIucmVnaXN0ZXIoY29waWVkX3RyYWRlKQogICAgICAgIGF3YWl0IHBlcmZvcm1hbmNlX3RyYWNrZXIucmVjb3JkX3RyYWRlKGNvcGllZF90cmFkZSkKICAgICAgICBhd2FpdCBub3RpZmllci5ub3RpZnlfdHJhZGUoY29waWVkX3RyYWRlLCBtYXJrZXRfcXVlc3Rpb249cXVlc3Rpb24pCgoKYXN5bmMgZGVmIG1haW5fbG9vcCgKICAgIHNjYW5uZXI6IEluc2lkZXJTY2FubmVyLAogICAgd2hhbGVfdHJhY2tlcjogV2hhbGVUcmFja2VyLAogICAgY29udmVyZ2VuY2Vfc2Nhbm5lcjogQ29udmVyZ2VuY2VTY2FubmVyLAogICAgZW5naW5lOiBUcmFkaW5nRW5naW5lLAogICAgbm90aWZpZXI6IFRlbGVncmFtTm90aWZpZXIsCiAgICBjbGllbnQ6IFBvbHltYXJrZXREYXRhQ2xpZW50LAogICAgcmlza19tYW5hZ2VyOiBSaXNrTWFuYWdlciwKICAgIHBvc2l0aW9uX21hbmFnZXI6IFBvc2l0aW9uTWFuYWdlciwKICAgIHBlcmZvcm1hbmNlX3RyYWNrZXI6IFBlcmZvcm1hbmNlVHJhY2tlciwKKSAtPiBOb25lOgogICAgIiIiQm91Y2xlIHByaW5jaXBhbGU6IHNjYW4gaW5zaWRlcnMgKyBiYWxlaW5lcyArIGNvbnZlcmdlbmNlLiIiIgogICAgbG9nZ2VyLmluZm8oZiJNYWluIGxvb3Agc3RhcnRlZC4gSW50ZXJ2YWw6IHtzZXR0aW5ncy5zY2FuX2ludGVydmFsfXMiKQogICAgbG9vcF9jb3VudCA9IDAKCiAgICB3aGlsZSBUcnVlOgogICAgICAgIHRyeToKICAgICAgICAgICAgbG9vcF9jb3VudCArPSAxCgogICAgICAgICAgICAjIDEuIFNjYW4gbGVzIG5vdXZlbGxlcyBiYWxlaW5lcwogICAgICAgICAgICB3aGFsZV9ldmVudHMgPSBhd2FpdCB3aGFsZV90cmFja2VyLnNjYW4oKQogICAgICAgICAgICBmb3IgZXZlbnQgaW4gd2hhbGVfZXZlbnRzOgogICAgICAgICAgICAgICAgbWFya2V0X2luZm8gPSBhd2FpdCBjbGllbnQuZ2V0X21hcmtldF9pbmZvKGV2ZW50WyJjb25kaXRpb25faWQiXSkKICAgICAgICAgICAgICAgIHF1ZXN0aW9uID0gbWFya2V0X2luZm8uZ2V0KCJxdWVzdGlvbiIsICIiKSBpZiBtYXJrZXRfaW5mbyBlbHNlICIiCiAgICAgICAgICAgICAgICBhd2FpdCBub3RpZmllci5ub3RpZnlfd2hhbGVfZXZlbnQoCiAgICAgICAgICAgICAgICAgICAgd2FsbGV0PWV2ZW50WyJ3YWxsZXQiXSwKICAgICAgICAgICAgICAgICAgICBhbW91bnRfdXNkYz1ldmVudFsiYW1vdW50X3VzZGMiXSwKICAgICAgICAgICAgICAgICAgICBtYXJrZXRfcXVlc3Rpb249cXVlc3Rpb24sCiAgICAgICAgICAgICAgICAgICAgc2lkZT1ldmVudFsic2lkZSJdLAogICAgICAgICAgICAgICAgICAgIHByaWNlPWV2ZW50WyJwcmljZSJdLAogICAgICAgICAgICAgICAgKQoKICAgICAgICAgICAgIyAyLiBTY2FuIGRlIGNvbnZlcmdlbmNlIChwbHVzaWV1cnMgaW5zaWRlcnMgc3VyIG3Dqm1lIG1hcmNow6kpCiAgICAgICAgICAgIGNvbnZlcmdlbmNlX3NpZ25hbHMgPSBhd2FpdCBjb252ZXJnZW5jZV9zY2FubmVyLnNjYW4oKQogICAgICAgICAgICBmb3Igc2lnbmFsIGluIGNvbnZlcmdlbmNlX3NpZ25hbHM6CiAgICAgICAgICAgICAgICBsb2dnZXIuaW5mbygKICAgICAgICAgICAgICAgICAgICBmIltDT05WRVJHRU5DRV0ge3NpZ25hbC5nZXQoJ2NvdW50JywgMCl9IGluc2lkZXJzIOKGkiB7c2lnbmFsLmdldCgncXVlc3Rpb24nLCAnJylbOjYwXX0iCiAgICAgICAgICAgICAgICApCiAgICAgICAgICAgICAgICBpZiBoYXNhdHRyKG5vdGlmaWVyLCAibm90aWZ5X2NvbnZlcmdlbmNlIik6CiAgICAgICAgICAgICAgICAgICAgYXdhaXQgbm90aWZpZXIubm90aWZ5X2NvbnZlcmdlbmNlKHNpZ25hbCkKCiAgICAgICAgICAgICMgMy4gU2NhbiBsZXMgbm91dmVhdXggdHJhZGVzIGRlcyB3YWxsZXRzIHN1aXZpcwogICAgICAgICAgICB3aXRoIGdldF9kYigpIGFzIGRiOgogICAgICAgICAgICAgICAgYWN0aXZlX3dhbGxldHMgPSAoCiAgICAgICAgICAgICAgICAgICAgZGIucXVlcnkoVHJhY2tlZFdhbGxldCkKICAgICAgICAgICAgICAgICAgICAuZmlsdGVyKFRyYWNrZWRXYWxsZXQuaXNfYWN0aXZlID09IFRydWUpCiAgICAgICAgICAgICAgICAgICAgLm9yZGVyX2J5KFRyYWNrZWRXYWxsZXQuc2NvcmUuZGVzYygpKQogICAgICAgICAgICAgICAgICAgIC5hbGwoKQogICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgd2FsbGV0X2FkZHJlc3NlcyA9IFt3LmFkZHJlc3MgZm9yIHcgaW4gYWN0aXZlX3dhbGxldHNdCgogICAgICAgICAgICBpZiBub3Qgd2FsbGV0X2FkZHJlc3NlczoKICAgICAgICAgICAgICAgIGxvZ2dlci5kZWJ1ZygiTm8gYWN0aXZlIHdhbGxldHMgeWV0LiBXYWl0aW5nIGZvciByZWZyZXNoLi4uIikKICAgICAgICAgICAgICAgIGF3YWl0IGFzeW5jaW8uc2xlZXAoc2V0dGluZ3Muc2Nhbl9pbnRlcnZhbCkKICAgICAgICAgICAgICAgIGNvbnRpbnVlCgogICAgICAgICAgICAjIFNjYW4gZW4gcGFyYWxsw6VsZSBwb3VyIHRvdXMgbGVzIHdhbGxldHMgYWN0aWZzCiAgICAgICAgICAgIG5ld190cmFkZXNfdGFza3MgPSBbCiAgICAgICAgICAgICAgICBzY2FubmVyLmdldF9uZXdfdHJhZGVzKGFkZHIpIGZvciBhZGRyIGluIHdhbGxldF9hZGRyZXNzZXMKICAgICAgICAgICAgXQogICAgICAgICAgICBhbGxfbmV3X3RyYWRlcyA9IGF3YWl0IGFzeW5jaW8uZ2F0aGVyKCpuZXdfdHJhZGVzX3Rhc2tzLCByZXR1cm5fZXhjZXB0aW9ucz1UcnVlKQoKICAgICAgICAgICAgZm9yIHdhbGxldF9hZGRyLCBuZXdfdHJhZGVzIGluIHppcCh3YWxsZXRfYWRkcmVzc2VzLCBhbGxfbmV3X3RyYWRlcyk6CiAgICAgICAgICAgICAgICBpZiBpc2luc3RhbmNlKG5ld190cmFkZXMsIEV4Y2VwdGlvbik6CiAgICAgICAgICAgICAgICAgICAgbG9nZ2VyLndhcm5pbmcoZiJTY2FuIGZhaWxlZCBmb3Ige3dhbGxldF9hZGRyWzo4XX0uLi46IHtuZXdfdHJhZGVzfSIpCiAgICAgICAgICAgICAgICAgICAgY29udGludWUKCiAgICAgICAgICAgICAgICBmb3IgdHJhZGUgaW4gbmV3X3RyYWRlczoKICAgICAgICAgICAgICAgICAgICBhd2FpdCBwcm9jZXNzX25ld190cmFkZSgKICAgICAgICAgICAgICAgICAgICAgICAgdHJhZGU9dHJhZGUsCiAgICAgICAgICAgICAgICAgICAgICAgIHdhbGxldF9hZGRyZXNzPXdhbGxldF9hZGRyLAogICAgICAgICAgICAgICAgICAgICAgICBlbmdpbmU9ZW5naW5lLAogICAgICAgICAgICAgICAgICAgICAgICBub3RpZmllcj1ub3RpZmllciwKICAgICAgICAgICAgICAgICAgICAgICAgY2xpZW50PWNsaWVudCwKICAgICAgICAgICAgICAgICAgICAgICAgcmlza19tYW5hZ2VyPXJpc2tfbWFuYWdlciwKICAgICAgICAgICAgICAgICAgICAgICAgcG9zaXRpb25fbWFuYWdlcj1wb3NpdGlvbl9tYW5hZ2VyLAogICAgICAgICAgICAgICAgICAgICAgICBwZXJmb3JtYW5jZV90cmFja2VyPXBlcmZvcm1hbmNlX3RyYWNrZXIsCiAgICAgICAgICAgICAgICAgICAgKQoKICAgICAgICAgICAgIyA0LiBSYXBwb3J0IGRlIHBlcmZvcm1hbmNlIHRvdXRlcyBsZXMgMTAgaXTDqXJhdGlvbnMKICAgICAgICAgICAgaWYgbG9vcF9jb3VudCAlIDEwID09IDA6CiAgICAgICAgICAgICAgICBzdGF0cyA9IGF3YWl0IHBlcmZvcm1hbmNlX3RyYWNrZXIuZ2V0X3N1bW1hcnkoKQogICAgICAgICAgICAgICAgbG9nZ2VyLmluZm8oCiAgICAgICAgICAgICAgICAgICAgZiJbUEVSRl0gV2luIHJhdGU6IHtzdGF0cy5nZXQoJ3dpbl9yYXRlJywgMCk6LjElfSB8ICIKICAgICAgICAgICAgICAgICAgICBmIlBuTDoge3N0YXRzLmdldCgndG90YWxfcG5sX3VzZGMnLCAwKTorLjJmfSBVU0RDIHwgIgogICAgICAgICAgICAgICAgICAgIGYiVHJhZGVzOiB7c3RhdHMuZ2V0KCd0b3RhbF90cmFkZXMnLCAwKX0iCiAgICAgICAgICAgICAgICApCgogICAgICAgIGV4Y2VwdCBhc3luY2lvLkNhbmNlbGxlZEVycm9yOgogICAgICAgICAgICByYWlzZQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgbG9nZ2VyLmVycm9yKGYiTWFpbiBsb29wIGVycm9yOiB7ZX0iKQoKICAgICAgICBhd2FpdCBhc3luY2lvLnNsZWVwKHNldHRpbmdzLnNjYW5faW50ZXJ2YWwpCgoKYXN5bmMgZGVmIHJ1bigpIC0+IE5vbmU6CiAgICAiIiJQb2ludCBkJ2VudHLDqWUgcHJpbmNpcGFsIGR1IGJvdC4iIiIKICAgIGxvZ2dlci5pbmZvKCI9IiAqIDUwKQogICAgbG9nZ2VyLmluZm8oIiBQb2x5SW5zaWRlciBCb3QgdjEuMSBzdGFydGluZy4uLiIpCiAgICBsb2dnZXIuaW5mbyhmIiBNb2RlOiB7J0RSWSBSVU4g8J+bnScgaWYgc2V0dGluZ3MuZHJ5X3J1biBlbHNlICdMSVZFIPCfn6InfSIpCiAgICBsb2dnZXIuaW5mbygiPSIgKiA1MCkKCiAgICAjIEluaXQgREIKICAgIGluaXRfZGIoKQoKICAgICMgSW5zdGFuY2lhdGlvbiBkZXMgY29tcG9zYW50cwogICAgY2xpZW50ID0gUG9seW1hcmtldERhdGFDbGllbnQoKQogICAgbm90aWZpZXIgPSBUZWxlZ3JhbU5vdGlmaWVyKCkKICAgIHNjYW5uZXIgPSBJbnNpZGVyU2Nhbm5lcihjbGllbnQ9Y2xpZW50KQogICAgd2hhbGVfdHJhY2tlciA9IFdoYWxlVHJhY2tlcihjbGllbnQ9Y2xpZW50KQogICAgY29udmVyZ2VuY2Vfc2Nhbm5lciA9IENvbnZlcmdlbmNlU2Nhbm5lcihjbGllbnQ9Y2xpZW50KQogICAgcmlza19tYW5hZ2VyID0gUmlza01hbmFnZXIoKQogICAgcG9zaXRpb25fbWFuYWdlciA9IFBvc2l0aW9uTWFuYWdlcigpCiAgICBwZXJmb3JtYW5jZV90cmFja2VyID0gUGVyZm9ybWFuY2VUcmFja2VyKCkKICAgIGVuZ2luZSA9IFRyYWRpbmdFbmdpbmUoKQoKICAgICMgTm90aWZpY2F0aW9uIGRlIGTDqW1hcnJhZ2UKICAgIGF3YWl0IG5vdGlmaWVyLm5vdGlmeV9zdGFydHVwKGRyeV9ydW49c2V0dGluZ3MuZHJ5X3J1bikKCiAgICAjIExhbmNlIGxlIHdhbGxldCByZWZyZXNoZXIgZW4gYmFja2dyb3VuZCAodG91dGVzIGxlcyA2MG1pbikKICAgIHJlZnJlc2hlciA9IFdhbGxldFJlZnJlc2hlcigKICAgICAgICBzY2FubmVyPXNjYW5uZXIsCiAgICAgICAgbm90aWZpZXI9bm90aWZpZXIsCiAgICAgICAgaW50ZXJ2YWxfbWludXRlcz02MCwKICAgICkKICAgIGF3YWl0IHJlZnJlc2hlci5zdGFydCgpCgogICAgdHJ5OgogICAgICAgIGF3YWl0IG1haW5fbG9vcCgKICAgICAgICAgICAgc2Nhbm5lcj1zY2FubmVyLAogICAgICAgICAgICB3aGFsZV90cmFja2VyPXdoYWxlX3RyYWNrZXIsCiAgICAgICAgICAgIGNvbnZlcmdlbmNlX3NjYW5uZXI9Y29udmVyZ2VuY2Vfc2Nhbm5lciwKICAgICAgICAgICAgZW5naW5lPWVuZ2luZSwKICAgICAgICAgICAgbm90aWZpZXI9bm90aWZpZXIsCiAgICAgICAgICAgIGNsaWVudD1jbGllbnQsCiAgICAgICAgICAgIHJpc2tfbWFuYWdlcj1yaXNrX21hbmFnZXIsCiAgICAgICAgICAgIHBvc2l0aW9uX21hbmFnZXI9cG9zaXRpb25fbWFuYWdlciwKICAgICAgICAgICAgcGVyZm9ybWFuY2VfdHJhY2tlcj1wZXJmb3JtYW5jZV90cmFja2VyLAogICAgICAgICkKICAgIGV4Y2VwdCBLZXlib2FyZEludGVycnVwdDoKICAgICAgICBsb2dnZXIuaW5mbygiQm90IHN0b3BwZWQgYnkgdXNlci4iKQogICAgZmluYWxseToKICAgICAgICBhd2FpdCBjbGllbnQuY2xvc2UoKQogICAgICAgIGxvZ2dlci5pbmZvKCJDbGVhbnVwIGRvbmUuIEJ5ZSEiKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBhc3luY2lvLnJ1bihydW4oKSkK
+"""
+PolyInsider Bot v2.0
+=====================
+Architecture 7 phases:
+  1. Whale scan         — baleines sur nouveaux marchés
+  2. Convergence scan   — plusieurs insiders sur même marché
+  3. Insider copy       — copy trading wallets scorés
+  4. Arbitrage scan     — opportunités Polymarket vs Kalshi  [périodique]
+  5. Market scan        — 5000+ marchés, arb interne        [périodique]
+  6. LLM analysis       — GPT-4o-mini + RAG actualités      [périodique, optionnel]
+  7. Performance report — win rate / PnL / trades           [périodique]
+"""
+import asyncio
+
+import aiohttp
+
+from bot.config import get_settings
+from bot.database import get_db, TrackedWallet, init_db
+from bot.trading.polymarket import PolymarketDataClient
+from bot.scanner.insider import InsiderScanner
+from bot.scanner.whale import WhaleTracker
+from bot.scanner.wallet_refresher import WalletRefresher
+from bot.scanner.convergence import ConvergenceScanner
+from bot.scanner.arbitrage import ArbitrageScanner
+from bot.scanner.market_scanner import MarketScanner
+from bot.trading.engine import TradingEngine
+from bot.trading.risk import RiskManager
+from bot.trading.position_manager import PositionManager
+from bot.trading.sizing import PositionSizer
+from bot.trading.filters import ConvictionFilter
+from bot.notifications.telegram import TelegramNotifier
+from bot.analytics.performance import PerformanceTracker
+from bot.ai.llm_agent import LLMAgent
+from bot.utils.logger import logger
+
+settings = get_settings()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trade processing
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def process_new_trade(
+    trade: dict,
+    wallet_address: str,
+    wallet_score: float,
+    engine: TradingEngine,
+    notifier: TelegramNotifier,
+    client: PolymarketDataClient,
+    risk_manager: RiskManager,
+    position_manager: PositionManager,
+    performance_tracker: PerformanceTracker,
+    conv_filter: ConvictionFilter,
+    sizer: PositionSizer,
+) -> None:
+    """Pipeline complet de traitement d'un trade insider détecté."""
+    token_id = trade.get("asset", "")
+    price = float(trade.get("price", 0))
+    amount = float(trade.get("usdcSize", 0))
+    side = trade.get("side", "BUY").upper()
+    condition_id = trade.get("conditionId", "")
+
+    if not token_id or price <= 0 or amount <= 0:
+        return
+
+    # ── Étape 1 : Filtre de conviction (fast, synchrone) ─────────────────
+    f = conv_filter.evaluate(
+        source_amount=amount,
+        price=price,
+        wallet_score=wallet_score,
+        market_id=condition_id,
+    )
+    if not f.passed:
+        return
+
+    # ── Étape 2 : Risk check (synchrone, Kelly sizing) ───────────────────
+    decision = risk_manager.evaluate(
+        token_id=token_id,
+        price=price,
+        source_amount=amount,
+        wallet_win_rate=wallet_score,
+    )
+    if not decision.approved:
+        logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
+        return
+
+    # ── Étape 3 : Position déjà ouverte ? ───────────────────────────────
+    try:
+        already_open = await position_manager.has_open_position(
+            token_id=token_id, side=side
+        )
+        if already_open:
+            logger.debug(f"[POS] Already open: {token_id[:8]}")
+            return
+    except Exception:
+        pass  # PositionManager optionnel — dégrade gracieusement
+
+    # ── Étape 4 : Récupère les infos du marché ───────────────────────────
+    market_info = await client.get_market_info(condition_id) if condition_id else None
+    question = market_info.get("question", "") if market_info else ""
+
+    # ── Étape 5 : Sizing Kelly standalone (pour log / audit) ────────────
+    size = sizer.calculate(
+        yes_price=price,
+        conviction_score=f.score,
+        source_amount=amount,
+    )
+    logger.debug(f"[SIZE] {size.rationale}")
+
+    # ── Étape 6 : Exécution (engine gère son propre Kelly interne) ───────
+    copied_trade = await engine.copy_trade(
+        source_wallet=wallet_address,
+        token_id=token_id,
+        side=side,
+        price=price,
+        source_amount=size.amount_usdc,
+        market_question=question,
+        market_id=condition_id,
+    )
+
+    if copied_trade:
+        try:
+            await position_manager.register(copied_trade)
+        except Exception:
+            pass
+        try:
+            await performance_tracker.record_trade(copied_trade)
+        except Exception:
+            pass
+        await notifier.notify_trade(copied_trade, market_question=question)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def main_loop(
+    scanner: InsiderScanner,
+    whale_tracker: WhaleTracker,
+    convergence_scanner: ConvergenceScanner,
+    arbitrage_scanner: ArbitrageScanner,
+    market_scanner: MarketScanner,
+    llm_agent: LLMAgent,
+    engine: TradingEngine,
+    notifier: TelegramNotifier,
+    client: PolymarketDataClient,
+    risk_manager: RiskManager,
+    position_manager: PositionManager,
+    performance_tracker: PerformanceTracker,
+    conv_filter: ConvictionFilter,
+    sizer: PositionSizer,
+) -> None:
+    """Boucle principale — architecture 7 phases."""
+    logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
+
+    ARB_EVERY = 20
+    MARKET_EVERY = settings.market_scan_every_n_loops
+    LLM_EVERY = settings.llm_scan_every_n_loops
+    PERF_EVERY = 10
+
+    loop_count = 0
+
+    while True:
+        try:
+            loop_count += 1
+
+            # ── Phase 1 : Whale scan ─────────────────────────────────────
+            whale_events = await whale_tracker.scan()
+            for event in whale_events:
+                mi = await client.get_market_info(event["condition_id"])
+                q = mi.get("question", "") if mi else ""
+                await notifier.notify_whale_event(
+                    wallet=event["wallet"],
+                    amount_usdc=event["amount_usdc"],
+                    market_question=q,
+                    side=event["side"],
+                    price=event["price"],
+                )
+
+            # ── Phase 2 : Convergence scan ───────────────────────────────
+            conv_signals = await convergence_scanner.scan()
+            for sig in conv_signals:
+                logger.info(
+                    f"[CONV] {sig.get('count', 0)} insiders → "
+                    f"{sig.get('question', '')[:60]}"
+                )
+                if hasattr(notifier, "notify_convergence"):
+                    await notifier.notify_convergence(sig)
+
+            # ── Phase 3 : Insider copy trading ──────────────────────────
+            with get_db() as db:
+                active_wallets = (
+                    db.query(TrackedWallet)
+                    .filter(TrackedWallet.is_active == True)
+                    .order_by(TrackedWallet.score.desc())
+                    .all()
+                )
+                wallet_data = [
+                    (w.address, float(w.score or 0.70))
+                    for w in active_wallets
+                ]
+
+            if not wallet_data:
+                logger.debug("No active wallets yet — waiting for refresher...")
+                await asyncio.sleep(settings.scan_interval)
+                continue
+
+            all_trades = await asyncio.gather(
+                *[scanner.get_new_trades(addr) for addr, _ in wallet_data],
+                return_exceptions=True,
+            )
+
+            for (wallet_addr, wallet_score), new_trades in zip(wallet_data, all_trades):
+                if isinstance(new_trades, Exception):
+                    logger.warning(f"Scan error {wallet_addr[:8]}...: {new_trades}")
+                    continue
+                for trade in new_trades:
+                    await process_new_trade(
+                        trade=trade,
+                        wallet_address=wallet_addr,
+                        wallet_score=wallet_score,
+                        engine=engine,
+                        notifier=notifier,
+                        client=client,
+                        risk_manager=risk_manager,
+                        position_manager=position_manager,
+                        performance_tracker=performance_tracker,
+                        conv_filter=conv_filter,
+                        sizer=sizer,
+                    )
+
+            # ── Phase 4 : Arbitrage cross-platform ──────────────────────
+            if loop_count % ARB_EVERY == 0:
+                arb_opps = await arbitrage_scanner.scan()
+                for opp in arb_opps[:5]:  # Top 5 uniquement
+                    logger.info(
+                        f"[ARB] +{opp.profit_pct:.1%} | {opp.direction} | "
+                        f"{opp.poly_question[:45]}..."
+                    )
+                    if hasattr(notifier, "notify_arbitrage"):
+                        await notifier.notify_arbitrage(opp)
+
+            # ── Phase 5 : Market scan haute échelle ──────────────────────
+            if loop_count % MARKET_EVERY == 0:
+                signals = await market_scanner.scan_all(
+                    max_markets=settings.market_scan_max_markets
+                )
+                internal_arbs = [s for s in signals if s.signal_type == "INTERNAL_ARB"]
+                if internal_arbs:
+                    logger.info(
+                        f"[SCANNER] {len(internal_arbs)} internal arb signals — "
+                        f"top: {internal_arbs[0].question[:50]} "
+                        f"(spread={internal_arbs[0].spread:.3f})"
+                    )
+
+            # ── Phase 6 : LLM analysis (si activé) ──────────────────────
+            if loop_count % LLM_EVERY == 0 and llm_agent.is_enabled():
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as session:
+                        async with session.get(
+                            f"{settings.polymarket_gamma_host}/markets",
+                            params={
+                                "active": "true",
+                                "closed": "false",
+                                "limit": settings.llm_top_markets * 4,
+                            },
+                        ) as resp:
+                            if resp.status == 200:
+                                hot = await resp.json()
+                                if isinstance(hot, list):
+                                    llm_signals = await llm_agent.batch_analyze(
+                                        hot, top_n=settings.llm_top_markets
+                                    )
+                                    for sig in llm_signals:
+                                        logger.info(
+                                            f"[LLM] {sig.recommendation} "
+                                            f"'{sig.question[:45]}' "
+                                            f"conf={sig.confidence:.0%} "
+                                            f"misprice={sig.mispricing_pct:.1%}"
+                                        )
+                                        if hasattr(notifier, "notify_llm_signal"):
+                                            await notifier.notify_llm_signal(sig)
+                except Exception as e:
+                    logger.debug(f"[LLM] Scan cycle error: {e}")
+
+            # ── Phase 7 : Performance report ─────────────────────────────
+            if loop_count % PERF_EVERY == 0:
+                try:
+                    stats = await performance_tracker.get_summary()
+                    logger.info(
+                        f"[PERF] "
+                        f"WR={stats.get('win_rate', 0):.1%} | "
+                        f"PnL={stats.get('total_pnl_usdc', 0):+.2f} USDC | "
+                        f"Trades={stats.get('total_trades', 0)} | "
+                        f"Open={len(risk_manager._open_positions)}"
+                    )
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+
+        await asyncio.sleep(settings.scan_interval)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run() -> None:
+    """Point d'entrée principal — PolyInsider Bot v2.0."""
+    logger.info("=" * 62)
+    logger.info("  PolyInsider Bot v2.0")
+    logger.info("  Copy · Whale · Convergence · Arbitrage · Scanner · LLM")
+    logger.info(f"  Mode: {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
+    logger.info(f"  LLM:  {'ENABLED 🤖' if settings.llm_enabled else 'disabled'}")
+    logger.info(f"  Arb:  {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
+    logger.info("=" * 62)
+
+    init_db()
+
+    # Instanciation de tous les modules
+    client              = PolymarketDataClient()
+    notifier            = TelegramNotifier()
+    scanner             = InsiderScanner(client=client)
+    whale_tracker       = WhaleTracker(client=client)
+    convergence_scanner = ConvergenceScanner(client=client)
+    arbitrage_scanner   = ArbitrageScanner(
+        min_profit_pct=settings.arb_min_profit_pct
+    )
+    market_scanner      = MarketScanner(max_concurrent=8)
+    llm_agent           = LLMAgent()
+    risk_manager        = RiskManager()
+    position_manager    = PositionManager()
+    performance_tracker = PerformanceTracker()
+    conv_filter         = ConvictionFilter()
+    sizer               = PositionSizer()
+    engine              = TradingEngine()
+
+    await notifier.notify_startup(dry_run=settings.dry_run)
+
+    # WalletRefresher en background (toutes les 60 min)
+    refresher = WalletRefresher(
+        scanner=scanner,
+        notifier=notifier,
+        interval_minutes=60,
+    )
+    await refresher.start()
+
+    try:
+        await main_loop(
+            scanner=scanner,
+            whale_tracker=whale_tracker,
+            convergence_scanner=convergence_scanner,
+            arbitrage_scanner=arbitrage_scanner,
+            market_scanner=market_scanner,
+            llm_agent=llm_agent,
+            engine=engine,
+            notifier=notifier,
+            client=client,
+            risk_manager=risk_manager,
+            position_manager=position_manager,
+            performance_tracker=performance_tracker,
+            conv_filter=conv_filter,
+            sizer=sizer,
+        )
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    finally:
+        await asyncio.gather(
+            client.close(),
+            arbitrage_scanner.close(),
+            market_scanner.close(),
+            llm_agent.close(),
+            return_exceptions=True,
+        )
+        logger.info("Cleanup done. Bye!")
+
+
+if __name__ == "__main__":
+    asyncio.run(run())
