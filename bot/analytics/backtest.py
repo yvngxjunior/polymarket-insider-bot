@@ -29,7 +29,6 @@ import argparse
 import asyncio
 import statistics
 from dataclasses import dataclass, field
-from typing import Optional
 
 from bot.trading.filters import ConvictionFilter
 from bot.trading.sizing import PositionSizer
@@ -60,7 +59,7 @@ class WalletBacktestResult:
     """Résultat backtest pour un wallet."""
     address: str
     trades_total: int = 0
-    trades_taken: int = 0        # trades qui ont passé le filtre
+    trades_taken: int = 0
     trades_won: int = 0
     pnl: float = 0.0
     win_rate: float = 0.0
@@ -148,7 +147,7 @@ class BacktestEngine:
         self.consecutive_losses = consecutive_losses
         self._filter = ConvictionFilter()
         self._sizer = PositionSizer(capital_usdc=capital)
-        self._client = client   # injecté en test, créé lazy sinon
+        self._client = client
 
     # ------------------------------------------------------------------
     # Point d'entrée principal
@@ -226,19 +225,16 @@ class BacktestEngine:
 
         return simulated
 
-    def _simulate_trade(
-        self, wallet: str, raw: dict
-    ) -> BacktestTrade:
+    def _simulate_trade(self, wallet: str, raw: dict) -> BacktestTrade:
         """Simule la décision du bot sur un trade historique."""
-        price         = float(raw.get("price", 0))
-        usdc_size     = float(raw.get("usdcSize", 0))
-        trade_size    = float(raw.get("tradeSize", 0))
-        side          = raw.get("side", "BUY").upper()
-        token_id      = raw.get("asset", "")
-        condition_id  = raw.get("conditionId", "")
-        question      = raw.get("title", "") or ""
+        price        = float(raw.get("price", 0))
+        usdc_size    = float(raw.get("usdcSize", 0))
+        trade_size   = float(raw.get("tradeSize", 0))
+        side         = raw.get("side", "BUY").upper()
+        token_id     = raw.get("asset", "")
+        condition_id = raw.get("conditionId", "")
+        question     = raw.get("title", "") or ""
 
-        # Vérification filtre de conviction (avec losing streak courant)
         f = self._filter.evaluate(
             source_amount=usdc_size,
             price=price,
@@ -256,21 +252,17 @@ class BacktestEngine:
                 market_question=question,
             )
 
-        # Sizing Kelly
         size = self._sizer.calculate(
             yes_price=price,
             conviction_score=f.score,
             source_amount=usdc_size,
         )
 
-        # Résultat réel du trade (retrouvé depuis l'historique Polymarket)
         won = usdc_size > trade_size
         if won:
-            # Profit = différence entre sortie et entrée, ramenée à notre mise
             profit_ratio = (usdc_size - trade_size) / trade_size if trade_size > 0 else 0
             pnl = size.amount_usdc * profit_ratio
         else:
-            # Perte = on perd l'intégralité de notre mise simulée
             pnl = -size.amount_usdc
 
         return BacktestTrade(
@@ -326,11 +318,8 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _sharpe(
-        trades: list[BacktestTrade],
-        risk_free: float = 0.0,
-    ) -> float:
-        """Sharpe ratio annualisé simplifié (basé sur les P&L par trade)."""
+    def _sharpe(trades: list[BacktestTrade], risk_free: float = 0.0) -> float:
+        """Sharpe ratio simplifié (basé sur les P&L par trade)."""
         pnls = [t.pnl for t in trades]
         if len(pnls) < 2:
             return 0.0
@@ -339,14 +328,8 @@ class BacktestEngine:
         return avg / std if std > 0 else 0.0
 
     @staticmethod
-    def _max_drawdown(
-        trades: list[BacktestTrade],
-        initial_capital: float,
-    ) -> float:
-        """
-        Max drawdown = plus grande chute en % depuis un pic de capital.
-        Calculé en rejouant les P&L dans l'ordre des trades.
-        """
+    def _max_drawdown(trades: list[BacktestTrade], initial_capital: float) -> float:
+        """Max drawdown en % depuis le pic de capital."""
         capital = initial_capital
         peak = initial_capital
         max_dd = 0.0
@@ -378,17 +361,14 @@ async def _cli_main(wallets: list[str], capital: float, score: float) -> None:
     from bot.trading.polymarket import PolymarketDataClient
     client = PolymarketDataClient()
     try:
-        engine = BacktestEngine(
-            capital=capital, wallet_score=score, client=client
-        )
+        engine = BacktestEngine(capital=capital, wallet_score=score, client=client)
         result = await engine.run(wallets=wallets)
         print(result.summary())
 
         if result.per_wallet:
             print("\nDétails par wallet:")
             for addr, w in sorted(
-                result.per_wallet.items(),
-                key=lambda x: x[1].pnl, reverse=True
+                result.per_wallet.items(), key=lambda x: x[1].pnl, reverse=True
             ):
                 print(
                     f"  {addr[:12]}...  "
