@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.1
+PolyInsider Bot v2.2
 =====================
 Architecture 7 phases + 2 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -11,6 +11,8 @@ Architecture 7 phases + 2 background tasks:
   7. Performance report — win rate / PnL / trades          [périodique]
   └ WalletRefresher    — refresh wallets insiders          [background, 60min]
   └ ExitManager        — TP / SL / durée max              [background, 60s]
+
+v2.2: Losing streak protection — consecutive_losses passé au ConvictionFilter
 """
 import asyncio
 import signal
@@ -41,13 +43,11 @@ settings = get_settings()
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Trade processing pipeline
-# ────────────────────────────────────────────────────────────────────────────
-
 async def process_new_trade(
     trade: dict,
     wallet_address: str,
     wallet_score: float,
+    consecutive_losses: int,
     engine: TradingEngine,
     notifier: TelegramNotifier,
     client: PolymarketDataClient,
@@ -66,10 +66,13 @@ async def process_new_trade(
     if not token_id or price <= 0 or amount <= 0:
         return
 
-    # Étape 1 — Filtre de conviction
+    # Étape 1 — Filtre de conviction (inclut losing streak check)
     f = conv_filter.evaluate(
-        source_amount=amount, price=price,
-        wallet_score=wallet_score, market_id=condition_id,
+        source_amount=amount,
+        price=price,
+        wallet_score=wallet_score,
+        market_id=condition_id,
+        consecutive_losses=consecutive_losses,
     )
     if not f.passed:
         return
@@ -95,7 +98,7 @@ async def process_new_trade(
     market_info = await client.get_market_info(condition_id) if condition_id else None
     question    = market_info.get("question", "") if market_info else ""
 
-    # Étape 5 — Sizing Kelly standalone (audit / log)
+    # Étape 5 — Sizing Kelly standalone
     size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
 
@@ -119,9 +122,6 @@ async def process_new_trade(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Main loop (7 phases)
-# ────────────────────────────────────────────────────────────────────────────
-
 async def main_loop(
     scanner: InsiderScanner,
     whale_tracker: WhaleTracker,
@@ -167,14 +167,22 @@ async def main_loop(
                 await notifier.notify_convergence(sig)
 
             # Phase 3 — Insider copy trading
+            # On charge address + score + consecutive_losses depuis la DB
             with get_db() as db:
-                wallets    = (
+                wallets = (
                     db.query(TrackedWallet)
                     .filter(TrackedWallet.is_active == True)  # noqa: E712
                     .order_by(TrackedWallet.score.desc())
                     .all()
                 )
-                wallet_data = [(w.address, float(w.score or 0.70)) for w in wallets]
+                wallet_data = [
+                    (
+                        w.address,
+                        float(w.score or 0.70),
+                        int(getattr(w, "consecutive_losses", 0) or 0),
+                    )
+                    for w in wallets
+                ]
 
             if not wallet_data:
                 logger.debug("No active wallets — waiting for refresher...")
@@ -182,16 +190,19 @@ async def main_loop(
                 continue
 
             all_trades = await asyncio.gather(
-                *[scanner.get_new_trades(addr) for addr, _ in wallet_data],
+                *[scanner.get_new_trades(addr) for addr, _, _ in wallet_data],
                 return_exceptions=True,
             )
-            for (addr, score), trades in zip(wallet_data, all_trades):
+            for (addr, score, losses), trades in zip(wallet_data, all_trades):
                 if isinstance(trades, Exception):
                     logger.warning(f"Scan error {addr[:8]}: {trades}")
                     continue
                 for trade in trades:
                     await process_new_trade(
-                        trade=trade, wallet_address=addr, wallet_score=score,
+                        trade=trade,
+                        wallet_address=addr,
+                        wallet_score=score,
+                        consecutive_losses=losses,
                         engine=engine, notifier=notifier, client=client,
                         risk_manager=risk_manager, position_manager=position_manager,
                         performance_tracker=performance_tracker,
@@ -230,7 +241,9 @@ async def main_loop(
                             if resp.status == 200:
                                 hot = await resp.json()
                                 if isinstance(hot, list):
-                                    for sig in await llm_agent.batch_analyze(hot, top_n=settings.llm_top_markets):
+                                    for sig in await llm_agent.batch_analyze(
+                                        hot, top_n=settings.llm_top_markets
+                                    ):
                                         logger.info(
                                             f"[LLM] {sig.recommendation} ‘{sig.question[:45]}’ "
                                             f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
@@ -261,21 +274,18 @@ async def main_loop(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ────────────────────────────────────────────────────────────────────────────
-
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.1")
+    logger.info("  PolyInsider Bot v2.2")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
     logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
+    logger.info("  Losing streak protection: ON 🛡️")
     logger.info("=" * 62)
 
     init_db()
 
-    # ── Instanciation de tous les modules ──
     client              = PolymarketDataClient()
     notifier            = TelegramNotifier()
     risk_manager        = RiskManager()
@@ -293,12 +303,11 @@ async def run() -> None:
     exit_manager        = ExitManager(
         risk_manager=risk_manager,
         notifier=notifier,
-        engine=engine,          # ← passé ici pour les ordres SELL LIVE
+        engine=engine,
     )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
-    # ── Graceful shutdown (SIGTERM Docker + SIGINT Ctrl+C) ──
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
@@ -309,12 +318,10 @@ async def run() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _on_signal)
 
-    # ── Background tasks ──
     refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
     await refresher.start()
     await exit_manager.start()
 
-    # ── Boucle principale ──
     main_task = asyncio.create_task(
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
@@ -334,7 +341,6 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
 
-    # ── Cleanup ──
     await asyncio.gather(
         exit_manager.stop(),
         client.close(),
