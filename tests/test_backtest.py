@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bot.analytics.backtest import BacktestEngine, BacktestResult
+from bot.analytics.backtest import BacktestEngine, BacktestResult, BacktestTrade
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +69,26 @@ async def test_run_returns_backtest_result(engine_small):
 
 
 @pytest.mark.asyncio
+async def test_trades_are_backtest_trade_instances(engine_small):
+    """
+    Chaque élément de result.trades doit être une instance de BacktestTrade.
+    Vérifie que le moteur retourne bien le bon type et que les champs clés
+    (wallet, pnl, won, filter_reason) sont présents et correctement typés.
+    """
+    result = await engine_small.run(wallets=["0xWallet1"])
+    assert len(result.trades) > 0
+    for trade in result.trades:
+        assert isinstance(trade, BacktestTrade)
+        assert isinstance(trade.wallet, str)
+        assert isinstance(trade.pnl, float)
+        assert isinstance(trade.won, bool)
+        assert isinstance(trade.filter_reason, str)
+        assert isinstance(trade.simulated_amount, float)
+
+
+@pytest.mark.asyncio
 async def test_trades_count_matches_resolved(engine_small):
-    """Le nombre de trades simulés doit correspondre aux trades REDEEM/SELL."""
+    """Le nombre de trades simulés doit correspondre aux trades REDEEM/SELL injectés."""
     result = await engine_small.run(wallets=["0xWallet1"])
     assert len(result.trades) == 3
 
@@ -79,6 +97,7 @@ async def test_trades_count_matches_resolved(engine_small):
 async def test_winning_trades_increase_pnl(engine_small):
     """Les trades gagnants doivent produire un P&L positif global."""
     result = await engine_small.run(wallets=["0xWallet1"])
+    # 2 gagnants, 1 perdant → P&L global doit être positif
     assert result.total_pnl > 0
 
 
@@ -111,6 +130,15 @@ async def test_per_wallet_populated(engine_small):
     assert "0xWallet2" in result.per_wallet
 
 
+@pytest.mark.asyncio
+async def test_executed_trades_have_positive_simulated_amount(engine_small):
+    """Les trades exécutés (filter_reason='ok') doivent avoir un montant Kelly > 0."""
+    result = await engine_small.run(wallets=["0xWallet1"])
+    executed = [t for t in result.trades if t.filter_reason == "ok"]
+    assert all(isinstance(t, BacktestTrade) for t in executed)
+    assert all(t.simulated_amount > 0 for t in executed)
+
+
 # ---------------------------------------------------------------------------
 # Tests filtre
 # ---------------------------------------------------------------------------
@@ -123,6 +151,7 @@ async def test_small_bets_are_filtered_out():
         capital=500.0, wallet_score=0.75, client=mock_client(trades)
     )
     result = await engine.run(wallets=["0xWallet1"])
+    assert all(isinstance(t, BacktestTrade) for t in result.trades)
     assert all(t.filter_reason != "ok" for t in result.trades)
 
 
@@ -137,14 +166,15 @@ async def test_non_resolved_trades_excluded():
         capital=500.0, wallet_score=0.75, client=mock_client(trades)
     )
     result = await engine.run(wallets=["0xWallet1"])
-    assert len(result.trades) == 1   # seul le REDEEM est simulé
+    assert len(result.trades) == 1
+    assert isinstance(result.trades[0], BacktestTrade)
 
 
 @pytest.mark.asyncio
 async def test_losing_streak_filters_all_trades():
     """
     Avec consecutive_losses=3 (= MAX_CONSECUTIVE_LOSSES),
-    tous les trades doivent être filtrés.
+    tous les trades doivent être filtrés et le P&L = 0.
     """
     trades = [
         make_trade(usdc_size=200.0, trade_size=100.0),
@@ -157,6 +187,7 @@ async def test_losing_streak_filters_all_trades():
         client=mock_client(trades),
     )
     result = await engine.run(wallets=["0xWallet1"])
+    assert all(isinstance(t, BacktestTrade) for t in result.trades)
     assert all(t.filter_reason != "ok" for t in result.trades)
     assert result.total_pnl == 0.0
 
@@ -167,7 +198,7 @@ async def test_losing_streak_filters_all_trades():
 
 @pytest.mark.asyncio
 async def test_summary_returns_string(engine_small):
-    """summary() doit retourner une chaîne non vide."""
+    """summary() doit retourner une chaîne non vide avec les sections attendues."""
     result = await engine_small.run(wallets=["0xWallet1"])
     s = result.summary()
     assert isinstance(s, str)
