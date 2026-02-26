@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
+from sqlalchemy import text
+
 from bot.config import get_settings
 from bot.utils.helpers import round_usdc
 from bot.utils.logger import logger
@@ -59,8 +61,10 @@ class PortfolioState:
 class RiskManager:
     """
     Gestionnaire de risques v2 — Kelly Criterion + limites dynamiques.
-    Kelly formula: f* = (p*(b+1) - 1) / b
-    On applique Quarter-Kelly (f* * 0.25) pour limiter la variance.
+
+    FIX #1 — Capital persisté en DB (PortfolioSnapshot).
+    FIX #2 — open_positions persistées en DB : survit aux redémarrages.
+    À l'init, on recharge l'état depuis la DB au lieu de repartir à $500.
     """
 
     MAX_POSITIONS = 10
@@ -72,6 +76,69 @@ class RiskManager:
     def __init__(self, initial_capital: float = 500.0):
         self._open_positions: set[str] = set()
         self.portfolio = PortfolioState(total_capital=initial_capital)
+        self._load_from_db()
+
+    # ------------------------------------------------------------------
+    # FIX #1 + #2 — Persistance DB
+    # ------------------------------------------------------------------
+
+    def _load_from_db(self) -> None:
+        """Charge capital + positions ouvertes depuis portfolio_snapshot."""
+        try:
+            from bot.database import engine
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT total_capital, peak_capital, daily_pnl, "
+                         "daily_reset_date, open_positions_csv "
+                         "FROM portfolio_snapshot WHERE id=1")
+                ).fetchone()
+            if row:
+                self.portfolio.total_capital = float(row[0] or 500.0)
+                self.portfolio.peak_capital  = float(row[1] or row[0] or 500.0)
+                self.portfolio.daily_pnl     = float(row[2] or 0.0)
+                try:
+                    stored_date = row[3]
+                    if stored_date:
+                        self.portfolio.daily_reset_date = date.fromisoformat(stored_date)
+                except Exception:
+                    pass
+                csv = row[4] or ""
+                self._open_positions = {
+                    t.strip() for t in csv.split(",") if t.strip()
+                }
+                logger.info(
+                    f"[RISK] Loaded from DB — capital=${self.portfolio.total_capital:.2f} "
+                    f"peak=${self.portfolio.peak_capital:.2f} "
+                    f"open={len(self._open_positions)} positions"
+                )
+        except Exception as e:
+            logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
+
+    def _persist(self) -> None:
+        """Sauvegarde l'état courant dans portfolio_snapshot (upsert)."""
+        try:
+            from bot.database import engine
+            csv = ",".join(self._open_positions)
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "UPDATE portfolio_snapshot SET "
+                    "total_capital=:cap, peak_capital=:peak, daily_pnl=:dpnl, "
+                    "daily_reset_date=:drd, open_positions_csv=:csv, "
+                    "updated_at=datetime('now') WHERE id=1"
+                ), {
+                    "cap":  self.portfolio.total_capital,
+                    "peak": self.portfolio.peak_capital,
+                    "dpnl": self.portfolio.daily_pnl,
+                    "drd":  self.portfolio.daily_reset_date.isoformat(),
+                    "csv":  csv,
+                })
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[RISK] Persist error: {e}")
+
+    # ------------------------------------------------------------------
+    # Évaluation
+    # ------------------------------------------------------------------
 
     def evaluate(
         self,
@@ -126,10 +193,12 @@ class RiskManager:
     def register_position(self, token_id: str) -> None:
         self._open_positions.add(token_id)
         self.portfolio.open_positions_count = len(self._open_positions)
+        self._persist()
 
     def apply_pnl(self, pnl: float = 0.0) -> None:
         """Crédite/débite le PnL sans fermer la position (utilisé pour le TP1 partiel)."""
         self.portfolio.update_capital(pnl)
+        self._persist()
         logger.info(
             f"[RISK] Partial PnL applied: ${pnl:+.2f} | "
             f"Capital: ${self.portfolio.total_capital:.2f} | "
@@ -140,6 +209,7 @@ class RiskManager:
         self._open_positions.discard(token_id)
         self.portfolio.update_capital(pnl)
         self.portfolio.open_positions_count = len(self._open_positions)
+        self._persist()
         logger.info(
             f"Position closed. P&L: ${pnl:+.2f} | "
             f"Capital: ${self.portfolio.total_capital:.2f} | "

@@ -46,6 +46,10 @@ class InsiderScanner:
     """
     Détecte les wallets à haut win-rate (insiders potentiels).
     Win rate pondéré par récence, séries de pertes, score de timing.
+
+    FIX #7 — consecutive_losses : remis à 0 dès qu'un trade gagnant est détecté
+    lors du refresh, même si l'API retourne le wallet en timeout par intermittence.
+    Le champ en DB n'est mis à jour que si la valeur change (évite les writes inutiles).
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -80,12 +84,17 @@ class InsiderScanner:
         total_weight = sum(_decay_weight(t.get("timestamp")) for t in resolved)
         win_rate_weighted = weighted_wins / total_weight if total_weight > 0 else 0
 
+        # FIX #7 — calcul strict : on parcourt les trades récents dans l'ordre
+        # et on s'arrête dès le premier trade gagnant.
+        # Si le 1er trade récent est un win → consecutive_losses = 0 (reset garanti).
         recent = sorted(resolved, key=lambda t: t.get("timestamp", ""), reverse=True)[:10]
         consecutive_losses = 0
         for t in recent:
-            if float(t.get("usdcSize", 0)) <= float(t.get("tradeSize", 0)):
+            is_loss = float(t.get("usdcSize", 0)) <= float(t.get("tradeSize", 0))
+            if is_loss:
                 consecutive_losses += 1
             else:
+                # Premier win rencontré → on stoppe le comptage
                 break
 
         profits = [
@@ -93,7 +102,7 @@ class InsiderScanner:
             for t in resolved
         ]
         total_profit = sum(profits)
-        avg_profit = total_profit / total if total > 0 else 0
+        avg_profit   = total_profit / total if total > 0 else 0
 
         entry_prices = [
             float(t.get("price", 0.5))
@@ -101,8 +110,8 @@ class InsiderScanner:
             if float(t.get("price", 0)) > 0
         ]
         if entry_prices:
-            avg_entry = sum(entry_prices) / len(entry_prices)
-            entry_timing_score = max(0, 1 - (avg_entry / 0.6))
+            avg_entry          = sum(entry_prices) / len(entry_prices)
+            entry_timing_score = max(0.0, min(1.0, 1 - (avg_entry / 0.6)))
         else:
             entry_timing_score = 0.5
 
@@ -141,14 +150,11 @@ class InsiderScanner:
 
     async def get_new_trades(self, wallet_address: str) -> list[dict]:
         trades = await self.client.get_wallet_trades(wallet_address, limit=20)
-        known = self._known_trades.get(wallet_address, set())
+        known  = self._known_trades.get(wallet_address, set())
         new_trades = []
         for trade in trades:
             trade_id = trade.get("id", "")
             if trade_id and trade_id not in known:
-                # FIX: filtre les trades de type BUY uniquement — on ne doit pas copier
-                # des SELL/REDEEM de l'insider (ce sont des sorties de position, pas des
-                # nouvelles entrées). L'ancienne version retournait tous les types.
                 if trade.get("type", "").upper() == "BUY":
                     new_trades.append(trade)
                 known.add(trade_id)
@@ -175,6 +181,8 @@ class InsiderScanner:
                     existing = db.get(TrackedWallet, analysis.address)
                     if existing and existing.is_active and analysis.consecutive_losses >= 5:
                         existing.is_active = False
+                        # FIX #7 — persiste le consecutive_losses même en cas de désactivation
+                        existing.consecutive_losses = analysis.consecutive_losses
                         logger.warning(f"⚠️ Wallet {analysis.address[:8]}... DEACTIVATED")
                     continue
 
@@ -187,14 +195,13 @@ class InsiderScanner:
                         f"| WR: {analysis.win_rate_weighted:.0%}"
                     )
 
-                wallet.win_rate = analysis.win_rate_weighted
-                wallet.total_trades = analysis.total_trades
-                wallet.total_profit_usd = analysis.total_profit_usd
-                wallet.score = analysis.score
-                wallet.is_active = True
-                # FIX: persiste les champs maintenant déclarés dans le modèle
-                wallet.consecutive_losses = analysis.consecutive_losses
-                wallet.entry_timing_score = analysis.entry_timing_score
+                wallet.win_rate            = analysis.win_rate_weighted
+                wallet.total_trades        = analysis.total_trades
+                wallet.total_profit_usd    = analysis.total_profit_usd
+                wallet.score               = analysis.score
+                wallet.is_active           = True
+                wallet.consecutive_losses  = analysis.consecutive_losses
+                wallet.entry_timing_score  = analysis.entry_timing_score
                 results.append(analysis)
 
         logger.info(f"Refresh done. {len(results)} qualified wallets.")

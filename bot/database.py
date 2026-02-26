@@ -92,22 +92,39 @@ class WalletPerformance(Base):
     score = Column(Float)
 
 
-# Colonnes à ajouter si absentes (migration guardée, safe sur base existante)
+class PortfolioSnapshot(Base):
+    """
+    FIX #1 — Persistance du capital réel et des positions ouvertes.
+    Une seule row (id=1) mise à jour à chaque changement.
+    Permet au RiskManager de retrouver son état exact après redémarrage.
+    """
+    __tablename__ = "portfolio_snapshot"
+
+    id = Column(Integer, primary_key=True, default=1)
+    total_capital = Column(Float, default=500.0)
+    peak_capital = Column(Float, default=500.0)
+    daily_pnl = Column(Float, default=0.0)
+    daily_reset_date = Column(String(10), default="")  # ISO date YYYY-MM-DD
+    # FIX #2 — open_positions : CSV des token_ids ouverts
+    open_positions_csv = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Colonnes à ajouter si absentes (migration gardée, safe sur base existante)
 _SAFE_MIGRATIONS = [
     ("tracked_wallets", "consecutive_losses", "INTEGER NOT NULL DEFAULT 0"),
     ("tracked_wallets", "entry_timing_score", "REAL NOT NULL DEFAULT 0.5"),
+    ("portfolio_snapshot", "open_positions_csv", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
 def init_db() -> None:
     """
     Crée toutes les tables si elles n'existent pas.
-    Applique aussi les migrations ALTER TABLE sécurisées pour les colonnes
-    ajoutées sur des bases existantes (SQLite uniquement).
+    Applique aussi les migrations ALTER TABLE sécurisées.
     """
     Base.metadata.create_all(bind=engine)
 
-    # Migration guardée : ajoute les colonnes manquantes sans crash si elles existent déjà
     if "sqlite" in settings.database_url:
         with engine.connect() as conn:
             for table, column, definition in _SAFE_MIGRATIONS:
@@ -117,9 +134,21 @@ def init_db() -> None:
                     logger.info(f"[DB] Migration: {table}.{column} ajoutée")
                 except Exception as e:
                     if "duplicate column" in str(e).lower():
-                        pass  # Colonne déjà présente, rien à faire
+                        pass
                     else:
                         logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
+
+    # Seed de la row portfolio_snapshot si absente
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT id FROM portfolio_snapshot WHERE id=1")).fetchone()
+        if row is None:
+            conn.execute(text(
+                "INSERT INTO portfolio_snapshot (id, total_capital, peak_capital, "
+                "daily_pnl, daily_reset_date, open_positions_csv, updated_at) "
+                "VALUES (1, 500.0, 500.0, 0.0, '', '', datetime('now'))"
+            ))
+            conn.commit()
+            logger.info("[DB] portfolio_snapshot row seeded.")
 
     logger.info("Database tables initialized.")
 
