@@ -15,6 +15,8 @@ Usage:
   await monitor.start()
   ...
   await monitor.stop()
+
+FIX HEALTH-1: immediate first check on start (vs wait 5min then check)
 """
 from __future__ import annotations
 
@@ -75,10 +77,13 @@ class HealthMonitor:
 
     async def start(self) -> None:
         self._running = True
+        # FIX HEALTH-1: reset activity timestamp on start
+        # Prevents false alert if setup took >threshold minutes
+        self._last_activity = datetime.now(timezone.utc)
         self._task = asyncio.create_task(self._loop(), name="health_monitor")
         logger.info(
             f"[HEALTH] Monitor started — silence threshold={self.silence_threshold_min}min "
-            f"check every {self.check_interval_sec}s"
+            f"check every {self.check_interval_sec}s (immediate first check)"
         )
 
     async def stop(self) -> None:
@@ -96,10 +101,26 @@ class HealthMonitor:
     # ------------------------------------------------------------------
 
     async def _loop(self) -> None:
+        # FIX HEALTH-1: immediate first check, then sleep
+        # Old: sleep → check (1st check after 5min)
+        # New: check → sleep (1st check immediate)
+        try:
+            await self._check()
+        except Exception as e:
+            logger.error(f"[HEALTH] Initial check error: {e}")
+
         while self._running:
-            await asyncio.sleep(self.check_interval_sec)
+            try:
+                await asyncio.wait_for(
+                    asyncio.sleep(self.check_interval_sec),
+                    timeout=None,
+                )
+            except asyncio.CancelledError:
+                break
+
             if not self._running:
                 break
+
             try:
                 await self._check()
             except asyncio.CancelledError:
