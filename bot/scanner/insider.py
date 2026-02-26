@@ -146,7 +146,11 @@ class InsiderScanner:
         for trade in trades:
             trade_id = trade.get("id", "")
             if trade_id and trade_id not in known:
-                new_trades.append(trade)
+                # FIX: filtre les trades de type BUY uniquement — on ne doit pas copier
+                # des SELL/REDEEM de l'insider (ce sont des sorties de position, pas des
+                # nouvelles entrées). L'ancienne version retournait tous les types.
+                if trade.get("type", "").upper() == "BUY":
+                    new_trades.append(trade)
                 known.add(trade_id)
         self._known_trades[wallet_address] = known
         return new_trades
@@ -188,6 +192,9 @@ class InsiderScanner:
                 wallet.total_profit_usd = analysis.total_profit_usd
                 wallet.score = analysis.score
                 wallet.is_active = True
+                # FIX: persiste les champs maintenant déclarés dans le modèle
+                wallet.consecutive_losses = analysis.consecutive_losses
+                wallet.entry_timing_score = analysis.entry_timing_score
                 results.append(analysis)
 
         logger.info(f"Refresh done. {len(results)} qualified wallets.")

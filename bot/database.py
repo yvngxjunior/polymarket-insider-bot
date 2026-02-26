@@ -46,6 +46,10 @@ class TrackedWallet(Base):
     is_whale = Column(Boolean, default=False)
     first_seen = Column(DateTime, default=datetime.utcnow)
     last_activity = Column(DateTime, default=datetime.utcnow)
+    # FIX: colonnes manquantes — utilisées par main.py via getattr() mais
+    # jamais déclarées dans le modèle → données jamais persistées en base.
+    consecutive_losses = Column(Integer, default=0)
+    entry_timing_score = Column(Float, default=0.5)
 
     trades = relationship("CopiedTrade", back_populates="source_wallet")
 

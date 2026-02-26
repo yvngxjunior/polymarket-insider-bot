@@ -13,6 +13,12 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
+# Capital initial par défaut : 10× le trade max (heuristique conservatrice).
+# FIX: si settings.initial_capital est défini, on l'utilise en priorité.
+# L'ancienne valeur max_trade_amount * 10 avec MAX_TRADE=10 donnait capital=100
+# → Kelly calculé sur une base 10× trop faible → tous les trades au minimum.
+_DEFAULT_CAPITAL = getattr(settings, "initial_capital", None) or settings.max_trade_amount * 10
+
 
 @dataclass
 class SizeResult:
@@ -27,7 +33,7 @@ class PositionSizer:
     MIN_TRADE_USDC = 2.0
 
     def __init__(self, capital_usdc: float = 0.0) -> None:
-        self._capital = capital_usdc if capital_usdc > 0 else settings.max_trade_amount * 10
+        self._capital = capital_usdc if capital_usdc > 0 else _DEFAULT_CAPITAL
 
     def update_capital(self, capital_usdc: float) -> None:
         if capital_usdc > 0:

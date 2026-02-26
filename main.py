@@ -160,9 +160,6 @@ async def process_new_trade(
     )
 
     if copied_trade:
-        # FIX P0: enregistre la position dans le RiskManager pour activer le filtre
-        # anti-doublon. Sans cela, _open_positions restait vide et le bot pouvait
-        # ouvrir plusieurs fois la même position sur le même token.
         try:
             risk_manager.register_position(copied_trade.token_id)
         except Exception as e:
@@ -363,7 +360,8 @@ async def run() -> None:
     client               = PolymarketDataClient()
     notifier             = TelegramNotifier()
     risk_manager         = RiskManager()
-    engine               = TradingEngine()
+    # FIX P0: engine reçoit le risk_manager global — plus d'instance isolée interne
+    engine               = TradingEngine(risk_manager=risk_manager)
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
     convergence_detector = ConvergenceDetector(client=client)

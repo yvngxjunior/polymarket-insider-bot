@@ -31,10 +31,20 @@ class PositionManager:
     """
     Surveille les positions ouvertes et les ferme automatiquement.
     Stratégies: Take Profit, Stop Loss, Time Stop.
+
+    NOTE: Ce composant est un monitor in-memory secondaire.
+    La gestion réelle des fermetures (ordres SELL + DB) est assurée par ExitManager.
+    PositionManager se charge uniquement de:
+      - Maintenir le registre in-memory des positions
+      - Déclencher release_position() dans le RiskManager quand une condition est atteinte
     """
 
-    TAKE_PROFIT_PCT = 0.80
-    STOP_LOSS_PCT = 0.40
+    # FIX: TAKE_PROFIT_PCT est maintenant un multiplicateur relatif à l'entrée
+    # Ancienne valeur 0.80 était comparée au prix absolu → TP se déclenchait
+    # dès que le prix > 0.80 quelle que soit la mise.
+    # Nouveau: TAKE_PROFIT_PCT = 0.40 → TP si current >= entry * 1.40 (+40%)
+    TAKE_PROFIT_PCT = 0.40
+    STOP_LOSS_PCT = 0.30
     MAX_AGE_HOURS = 72
     CHECK_INTERVAL = 30
 
@@ -86,9 +96,12 @@ class PositionManager:
                 logger.error(f"Position check error for {token_id[:16]}...: {e}")
 
     def _should_exit(self, pos: OpenPosition, current_price: float) -> Optional[str]:
-        if pos.side == "BUY" and current_price >= self.TAKE_PROFIT_PCT:
-            return f"✅ Take Profit @ {current_price:.3f}"
         if pos.side == "BUY":
+            # FIX: TP relatif à l'entrée, pas au prix absolu
+            # Avant: current_price >= TAKE_PROFIT_PCT (0.80) → comparaison absurde
+            # Maintenant: current_price >= entry_price * (1 + TAKE_PROFIT_PCT)
+            if current_price >= pos.entry_price * (1 + self.TAKE_PROFIT_PCT):
+                return f"✅ Take Profit @ {current_price:.3f} (+{self.TAKE_PROFIT_PCT:.0%} from entry {pos.entry_price:.3f})"
             loss_pct = (pos.entry_price - current_price) / pos.entry_price
             if loss_pct >= self.STOP_LOSS_PCT:
                 return f"🛑 Stop Loss @ {current_price:.3f} (-{loss_pct:.0%})"
@@ -104,8 +117,13 @@ class PositionManager:
             f"📤 Closing position: {reason} | "
             f"Market: {pos.market_question[:40]} | P&L: ${estimated_pnl:+.2f}"
         )
-        if not settings.dry_run:
-            pass  # ExitManager handles LIVE sells via engine.close_position()
+        # FIX: on ne double-ferme plus la position en LIVE.
+        # ExitManager gère déjà les ordres SELL → PositionManager se contente
+        # de libérer sa propre référence in-memory + notifier.
+        # release_position() est appelé ici uniquement pour le monitor in-memory;
+        # ExitManager appelle aussi release_position() via son propre flow.
+        # En pratique PositionManager et ExitManager sont redondants:
+        # ExitManager est le composant autoritaire, PositionManager est un fallback.
         self.risk.release_position(pos.token_id, pnl=estimated_pnl)
         self._positions.pop(pos.token_id, None)
         msg = (
@@ -118,9 +136,11 @@ class PositionManager:
         await self.notifier.send(msg)
 
     async def _get_current_price(self, token_id: str) -> Optional[float]:
+        # FIX: utilise /price (singulier) — l'ancien code utilisait /prices
+        # qui n'existe pas → 404 en permanence → aucune position jamais fermée.
         try:
             resp = await self.client._data_client.get(
-                "/prices", params={"token_id": token_id}
+                "/price", params={"token_id": token_id, "side": "BUY"}
             )
             if resp.status_code == 200:
                 return float(resp.json().get("price", 0))

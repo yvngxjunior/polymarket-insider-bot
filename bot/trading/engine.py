@@ -18,10 +18,15 @@ class TradingEngine:
     Exécute les trades sur Polymarket via le CLOB.
     DRY_RUN=True  → simulation uniquement (log + DB)
     DRY_RUN=False → ordres signés et envoyés sur Polygon
+
+    FIX P0: le RiskManager est désormais injecté depuis main.py (instance partagée).
+    L'ancienne version créait son propre RiskManager interne isolé → les limites
+    daily loss, drawdown et max_positions n'étaient jamais appliquées en LIVE.
     """
 
-    def __init__(self):
-        self.risk = RiskManager()
+    def __init__(self, risk_manager: RiskManager):
+        # FIX P0: plus de self.risk = RiskManager() isolé — on reçoit l'instance globale
+        self.risk = risk_manager
         self._client: Optional[ClobClient] = None
 
     def _get_client(self) -> ClobClient:
@@ -45,28 +50,21 @@ class TradingEngine:
         market_question: str = "",
         market_id: str = "",
     ) -> Optional[CopiedTrade]:
-        decision: TradeDecision = self.risk.evaluate(
-            token_id=token_id, price=price, source_amount=source_amount,
-        )
+        # NOTE: main.py appelle déjà risk_manager.evaluate() avant copy_trade().
+        # On n'appelle PAS self.risk.evaluate() ici pour éviter la double évaluation
+        # sur la même instance. Le trade est supposé approuvé à ce stade.
         trade_record = CopiedTrade(
             source_wallet_address=source_wallet, market_id=market_id,
             market_question=market_question, token_id=token_id,
-            side=side, amount_usdc=decision.amount_usdc, price=price,
+            side=side, amount_usdc=source_amount, price=price,
         )
-
-        if not decision.approved:
-            trade_record.status = TradeStatus.SKIPPED
-            trade_record.skip_reason = decision.reason
-            logger.warning(f"Trade SKIPPED — {decision.reason}")
-            self._save_trade(trade_record)
-            return trade_record
 
         if settings.dry_run:
             trade_record.status = TradeStatus.EXECUTED
             trade_record.skip_reason = "DRY_RUN"
             trade_record.executed_at = datetime.utcnow()
             logger.info(
-                f"🟡 [DRY RUN] Would {side} ${decision.amount_usdc} USDC "
+                f"🟡 [DRY RUN] Would {side} ${source_amount} USDC "
                 f"on {market_question[:50] or token_id[:20]}... @ {price:.3f}"
             )
             self._save_trade(trade_record)
@@ -76,7 +74,7 @@ class TradingEngine:
             client = self._get_client()
             side_const = BUY if side.upper() == "BUY" else SELL
             order_args = MarketOrderArgs(
-                token_id=token_id, amount=decision.amount_usdc, side=side_const,
+                token_id=token_id, amount=source_amount, side=side_const,
             )
             signed_order = client.create_market_order(order_args)
             response = client.post_order(signed_order)
@@ -84,9 +82,9 @@ class TradingEngine:
             trade_record.status = TradeStatus.EXECUTED
             trade_record.tx_hash = tx_hash
             trade_record.executed_at = datetime.utcnow()
-            self.risk.register_position(token_id)
+            # register_position est appelé dans main.py après copy_trade()
             logger.success(
-                f"✅ Trade EXECUTED: {side} ${decision.amount_usdc} USDC "
+                f"✅ Trade EXECUTED: {side} ${source_amount} USDC "
                 f"on {market_question[:40] or token_id[:20]}... | TX: {tx_hash[:12]}..."
             )
         except Exception as e:

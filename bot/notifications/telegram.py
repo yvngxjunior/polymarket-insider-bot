@@ -198,8 +198,9 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     async def notify_startup(self, dry_run: bool) -> None:
         mode = "🟡 DRY RUN" if dry_run else "🟢 LIVE"
+        # FIX: version corrigée (v2.4)
         msg = (
-            f"🤖 <b>PolyInsider Bot v2.1 Started</b>\n"
+            f"🤖 <b>PolyInsider Bot v2.4 Started</b>\n"
             f"────────────────────\n"
             f"Mode: <b>{mode}</b>\n"
             f"Scan interval: <b>{settings.scan_interval}s</b>\n"
