@@ -21,6 +21,7 @@ v2.4 (Sprint 2):
 """
 import asyncio
 import signal
+import sys
 
 import aiohttp
 
@@ -364,7 +365,6 @@ async def run() -> None:
     performance_tracker  = PerformanceTracker()
     conv_filter          = ConvictionFilter()
     sizer                = PositionSizer()
-    # PositionManager requires client, risk_manager, notifier
     position_manager     = PositionManager(
         client=client,
         risk_manager=risk_manager,
@@ -389,15 +389,19 @@ async def run() -> None:
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
-    loop = asyncio.get_running_loop()
+    # ─ Signal handling — Windows-compatible ────────────────────────────────
     stop_event = asyncio.Event()
+    loop       = asyncio.get_running_loop()
 
-    def _on_signal() -> None:
+    def _on_signal(signum, frame) -> None:  # noqa: ARG001
         logger.info("Shutdown signal received — stopping gracefully...")
-        stop_event.set()
+        loop.call_soon_threadsafe(stop_event.set)
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _on_signal)
+    signal.signal(signal.SIGINT,  _on_signal)
+    # SIGTERM n'existe pas sur Windows — on l'enregistre seulement sur Unix
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _on_signal)
+    # ───────────────────────────────────────────────────────────────────────
 
     refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
     await refresher.start()
