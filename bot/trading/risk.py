@@ -127,6 +127,15 @@ class RiskManager:
         self._open_positions.add(token_id)
         self.portfolio.open_positions_count = len(self._open_positions)
 
+    def apply_pnl(self, pnl: float = 0.0) -> None:
+        """Crédite/débite le PnL sans fermer la position (utilisé pour le TP1 partiel)."""
+        self.portfolio.update_capital(pnl)
+        logger.info(
+            f"[RISK] Partial PnL applied: ${pnl:+.2f} | "
+            f"Capital: ${self.portfolio.total_capital:.2f} | "
+            f"Open: {len(self._open_positions)}"
+        )
+
     def release_position(self, token_id: str, pnl: float = 0.0) -> None:
         self._open_positions.discard(token_id)
         self.portfolio.update_capital(pnl)

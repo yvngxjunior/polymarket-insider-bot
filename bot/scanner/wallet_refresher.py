@@ -104,8 +104,11 @@ class WalletRefresher:
 
             await self._run_refresh()
 
-            # Discovery tous les N refreshs
-            if self._refresh_count % self.discovery_ratio == 0:
+            # FIX: discovery ne se déclenche pas au cycle 0 (refresh_count == 0
+            # après le premier refresh immédiat car on incrémente dans _run_refresh).
+            # Avant: 0 % 3 == 0 → discovery se lançait immédiatement au 1er cycle
+            # après le refresh initial, avant que les wallets soient bien établis.
+            if self._refresh_count > 0 and self._refresh_count % self.discovery_ratio == 0:
                 await self._run_discovery()
 
     # ------------------------------------------------------------------

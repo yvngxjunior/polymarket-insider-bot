@@ -151,14 +151,20 @@ class ExitManager:
     # Traitement d'un cycle de vérification
     # ------------------------------------------------------------------
     async def _check_positions(self) -> None:
+        # FIX: filtre SQLAlchemy séparé pour éviter le tuple implicite
+        # L'ancienne syntaxe créait un tuple (condition, condition) au lieu
+        # d'une branche if/else, ce qui faisait tout passer en mode LIVE.
+        filter_cond = (
+            CopiedTrade.skip_reason.in_(["DRY_RUN", None])
+            if settings.dry_run
+            else CopiedTrade.tx_hash != None  # noqa: E711
+        )
         with get_db() as db:
             open_trades = (
                 db.query(CopiedTrade)
                 .filter(
                     CopiedTrade.status == TradeStatus.EXECUTED,
-                    CopiedTrade.skip_reason.in_(["DRY_RUN", None])
-                    if settings.dry_run
-                    else CopiedTrade.tx_hash != None,  # noqa: E711
+                    filter_cond,
                 )
                 .all()
             )
@@ -213,10 +219,10 @@ class ExitManager:
                 remaining = round(trade.amount_usdc - sell_amount, 2)
                 self._partial_sold[trade.id] = remaining
 
-                # Libère partiellement le capital dans le RiskManager
-                self.risk_manager.release_position(
-                    trade.token_id, pnl=pnl * self.PARTIAL_SELL_PCT
-                )
+                # FIX: apply_pnl() au lieu de release_position() pour le TP1 partiel.
+                # release_position() retirait le token de _open_positions, permettant
+                # au bot de ré-entrer immédiatement alors que la position est encore ouverte.
+                self.risk_manager.apply_pnl(pnl=pnl)
 
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                 await self.notifier.send(
@@ -235,14 +241,16 @@ class ExitManager:
                 # ── Fermeture totale ──
                 self.risk_manager.release_position(trade.token_id, pnl=pnl)
 
-                # Nettoie le dict de suivi partiel si besoin
+                # FIX: was_partial doit être évalué AVANT le .pop()
+                # Avant: was_partial était vérifié après le pop → toujours False
+                # → le tag "(TP1+TP2)" n'était jamais écrit en DB.
+                was_partial = trade.id in self._partial_sold
                 self._partial_sold.pop(trade.id, None)
 
                 # Marque la position comme clôturée en DB
                 with get_db() as db:
                     t = db.query(CopiedTrade).filter(CopiedTrade.id == trade.id).first()
                     if t:
-                        was_partial = trade.id in self._partial_sold
                         t.skip_reason = (
                             f"CLOSED{'(TP1+TP2)' if was_partial else ''}: "
                             f"{reason} | PnL {pnl:+.2f}"

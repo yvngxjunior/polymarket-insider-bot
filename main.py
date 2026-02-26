@@ -160,6 +160,14 @@ async def process_new_trade(
     )
 
     if copied_trade:
+        # FIX P0: enregistre la position dans le RiskManager pour activer le filtre
+        # anti-doublon. Sans cela, _open_positions restait vide et le bot pouvait
+        # ouvrir plusieurs fois la même position sur le même token.
+        try:
+            risk_manager.register_position(copied_trade.token_id)
+        except Exception as e:
+            logger.debug(f"[RISK] register_position error: {e}")
+
         health_monitor.record_trade()
         try:
             position_manager.register(
