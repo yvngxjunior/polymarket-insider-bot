@@ -1,3 +1,4 @@
+from collections import deque
 from bot.config import get_settings
 from bot.database import get_db, TrackedWallet
 from bot.trading.polymarket import PolymarketDataClient
@@ -8,23 +9,52 @@ settings = get_settings()
 RESOLVING_HIGH = 0.95
 RESOLVING_LOW  = 0.05
 
+# FIX WHALE-1: taille max du cache de deduplication
+_SEEN_MAXLEN = 10_000
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """
+    FIX WHALE-3: conversion float robuste.
+    Evite TypeError si l'API retourne null sur price / usdcSize.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 
 class WhaleTracker:
     """
-    Détecte les gros mouvements de capitaux sur Polymarket.
+    Detecte les gros mouvements de capitaux sur Polymarket.
 
     Filtres actifs:
-      1. Déduplication par transactionHash (ou wallet+market+timestamp)
-      2. Marchés quasi-résolus (price >0.95 ou <0.05) → skippés
-      3. SELL → skippés (sorties de position, pas des signaux d'entrée)
-      4. Mots-clés bruit (sports, crypto daily, etc.) → skippés
+      1. Deduplication par transactionHash (ou wallet+market+timestamp)
+      2. Marches quasi-resolus (price >0.95 ou <0.05) -> skipes
+      3. SELL -> skipes (sorties de position, pas des signaux d'entree)
+      4. Mots-cles bruit (sports, crypto daily, etc.) -> skipes
          Configurable via WHALE_KEYWORDS_BLACKLIST dans .env
+
+    FIX WHALE-1 -- self._seen remplace le set[str] par deque(maxlen=10_000).
+      L'ancienne troncature set(list(self._seen)[-5_000:]) etait non deterministe
+      (les sets Python sont non ordonnes -> l'ordre de list(set) est arbitraire
+      -> on conservait 5000 cles ALEATOIRES, pas les plus recentes).
+      deque(maxlen) expulse automatiquement les entrees les plus anciennes (FIFO)
+      sans troncature manuelle. __contains__ reste O(1) via le set interne.
+
+    FIX WHALE-2 -- is_whale mis a jour en batch a la fin du scan
+      au lieu d'une transaction DB par trade individuel.
     """
 
     def __init__(self, client: PolymarketDataClient):
         self.client = client
-        self._seen: set[str] = set()
-        # Cache des mots-clés (immutables pour la durée de vie du process)
+        # FIX WHALE-1: deque FIFO avec eviction automatique des plus anciens
+        # On utilise un set parallele pour les lookups O(1)
+        self._seen_deque: deque[str] = deque(maxlen=_SEEN_MAXLEN)
+        self._seen_set: set[str] = set()
+        # Cache des mots-cles (immutables pour la duree de vie du process)
         self._noise_keywords: list[str] = settings.get_whale_keywords_blacklist()
         if self._noise_keywords:
             logger.info(
@@ -32,6 +62,18 @@ class WhaleTracker:
             )
         else:
             logger.info("[WHALE] Keyword filter disabled (WHALE_KEYWORDS_BLACKLIST=__none__)")
+
+    def _seen_add(self, key: str) -> None:
+        """Ajoute une cle au cache FIFO. Expulse la plus ancienne si maxlen atteint."""
+        if len(self._seen_deque) == _SEEN_MAXLEN:
+            # La deque va expulser l'element le plus ancien -> on le retire du set aussi
+            oldest = self._seen_deque[0]
+            self._seen_set.discard(oldest)
+        self._seen_deque.append(key)
+        self._seen_set.add(key)
+
+    def _seen_contains(self, key: str) -> bool:
+        return key in self._seen_set
 
     @staticmethod
     def _dedup_key(trade: dict) -> str:
@@ -46,7 +88,7 @@ class WhaleTracker:
         return price >= RESOLVING_HIGH or price <= RESOLVING_LOW
 
     def _is_noise_market(self, title: str) -> bool:
-        """Retourne True si le titre contient un mot-clé de la blacklist."""
+        """Retourne True si le titre contient un mot-cle de la blacklist."""
         if not self._noise_keywords:
             return False
         t = title.lower()
@@ -66,19 +108,25 @@ class WhaleTracker:
             )
 
         new_events = []
+        # FIX WHALE-2: on collecte les wallets whale du cycle
+        # pour un seul batch DB a la fin (au lieu d'une connexion par trade)
+        whale_wallets_to_flag: list[str] = []
+
         for trade in large_trades:
             key = self._dedup_key(trade)
-            if key in self._seen:
+            # FIX WHALE-1: lookup O(1) via le set parallele
+            if self._seen_contains(key):
                 continue
-            self._seen.add(key)
+            self._seen_add(key)
 
-            price  = float(trade.get("price", 0))
+            # FIX WHALE-3: _safe_float() protege contre null API
+            price  = _safe_float(trade.get("price"))
+            amount = _safe_float(trade.get("usdcSize"))
             side   = trade.get("side", "BUY").upper()
             wallet = trade.get("maker", "")
-            amount = float(trade.get("usdcSize", 0))
             title  = trade.get("title", "") or trade.get("conditionId", "???")[:20]
 
-            # Filtre 1 — marché quasi-résolu
+            # Filtre 1 — marche quasi-resolu
             if self._is_market_resolved(price):
                 logger.debug(f"[WHALE skip/resolved] @ {price:.3f} — {title[:50]}")
                 continue
@@ -88,20 +136,19 @@ class WhaleTracker:
                 logger.debug(f"[WHALE skip/sell] {wallet[:10]}... ${amount:,.0f} — {title[:40]}")
                 continue
 
-            # Filtre 3 — marché bruit (sports, crypto daily, etc.)
+            # Filtre 3 — marche bruit (sports, crypto daily, etc.)
             if self._is_noise_market(title):
                 logger.debug(f"[WHALE skip/noise] {title[:60]}")
                 continue
 
             logger.info(
-                f"🐋 WHALE: {wallet[:10]}... "
+                f"WHALE: {wallet[:10]}... "
                 f"${amount:,.0f} USDC | {side} @ {price:.3f} | {title[:45]}"
             )
 
-            with get_db() as db:
-                w = db.get(TrackedWallet, wallet)
-                if w:
-                    w.is_whale = True
+            # FIX WHALE-2: accumule les wallets pour le batch update
+            if wallet:
+                whale_wallets_to_flag.append(wallet)
 
             new_events.append({
                 "wallet":       wallet,
@@ -114,7 +161,15 @@ class WhaleTracker:
                 "title":        title,
             })
 
-        if len(self._seen) > 10_000:
-            self._seen = set(list(self._seen)[-5_000:])
+        # FIX WHALE-2: une seule transaction DB pour tous les wallets whale du cycle
+        if whale_wallets_to_flag:
+            try:
+                with get_db() as db:
+                    for wallet_addr in whale_wallets_to_flag:
+                        w = db.get(TrackedWallet, wallet_addr)
+                        if w:
+                            w.is_whale = True
+            except Exception as e:
+                logger.warning(f"[WHALE] DB batch update failed: {e}")
 
         return new_events
