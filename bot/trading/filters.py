@@ -16,6 +16,7 @@ FIX FILTER-1  — status LIKE '%EXECUTED%' (case-insensitive).
 FIX FILTER-2  — MAX_CONSECUTIVE_LOSSES lu depuis settings (zéro hardcode).
 FIX FILTER-3  — accès direct settings (pas getattr() redondants).
 FIX FILTER-4  — enregistrement rate-limit après tous les checks (pas avant).
+FIX P2        — _CLEANUP_EVERY 500 → 100 (prévention memory leak).
 """
 from collections import defaultdict
 from dataclasses import dataclass
@@ -26,7 +27,9 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
-_CLEANUP_EVERY = 500
+# FIX P2: réduit 500 → 100 pour cleanup plus fréquent
+# Prévient _market_copies de grossir indéfiniment (memory leak)
+_CLEANUP_EVERY = 100
 
 
 @dataclass
@@ -45,21 +48,16 @@ class ConvictionFilter:
     MIN_TIMING_SCORE       = 0.30
 
     def __init__(self) -> None:
-        # FIX FILTER-3: accès direct (champs Pydantic définis, getattr inutile)
         self.min_bet: float   = settings.min_source_bet_usdc
         self.min_score: float = settings.min_wallet_score
         self.max_price: float = settings.max_price
         self.min_price: float = settings.min_price
-        # FIX FILTER-2: lu depuis settings (zéro hardcode)
         self.max_consecutive_losses: int = settings.max_consecutive_losses
         self._market_copies: dict[str, list[datetime]] = defaultdict(list)
         self._eval_count: int = 0
         self._load_rate_limit_from_db()
 
     def _load_rate_limit_from_db(self) -> None:
-        """
-        FIX FILTER-1: status LIKE '%EXECUTED%' (robuste multi-dialecte).
-        """
         try:
             from bot.database import engine
             from sqlalchemy import text
@@ -135,10 +133,6 @@ class ConvictionFilter:
         return FilterResult(passed=True, reason="ok", score=wallet_score)
 
     def _check_rate_limit(self, market_id: str) -> FilterResult:
-        """Vérifie le rate-limit SANS enregistrer la copie ici.
-        L'enregistrement est fait dans evaluate() après tous les checks passés.
-        FIX FILTER-4: évite de compter un trade refusé dans le rate-limit.
-        """
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=1)
         recent = [t for t in self._market_copies[market_id] if t > cutoff]
@@ -151,7 +145,6 @@ class ConvictionFilter:
         return FilterResult(passed=True, reason="ok", score=1.0)
 
     def _check_losing_streak(self, consecutive_losses: int) -> FilterResult:
-        # FIX FILTER-2: seuil lu depuis self.max_consecutive_losses (settings)
         if consecutive_losses >= self.max_consecutive_losses:
             return FilterResult(
                 passed=False,
@@ -237,7 +230,6 @@ class ConvictionFilter:
         total_w   = sum(weights)
         avg_score = sum(c.score * w for c, w in zip(checks, weights)) / total_w
 
-        # FIX FILTER-4: enregistrement APRES tous les checks passés
         if market_id:
             self._market_copies[market_id].append(datetime.utcnow())
 
