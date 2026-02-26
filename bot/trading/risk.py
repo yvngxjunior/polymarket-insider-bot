@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 
 from sqlalchemy import text
@@ -65,6 +65,13 @@ class RiskManager:
     FIX #1 — Capital persisté en DB (PortfolioSnapshot).
     FIX #2 — open_positions persistées en DB : survit aux redémarrages.
     À l'init, on recharge l'état depuis la DB au lieu de repartir à $500.
+
+    FIX RISK-1 — _persist() : UPSERT (UPDATE + INSERT si 0 lignes),
+                  updated_at via paramètre Python (compat SQLite + PostgreSQL).
+    FIX RISK-2 — _load_from_db() : robuste sur le type de daily_reset_date
+                  (str en SQLite, objet date en PostgreSQL).
+    FIX RISK-3 — _kelly_sizing() : win_rate clampé dans [0, 1] en entrée
+                  pour éviter un kelly positif avec un win_rate > 1.
     """
 
     MAX_POSITIONS = 10
@@ -88,18 +95,26 @@ class RiskManager:
             from bot.database import engine
             with engine.connect() as conn:
                 row = conn.execute(
-                    text("SELECT total_capital, peak_capital, daily_pnl, "
-                         "daily_reset_date, open_positions_csv "
-                         "FROM portfolio_snapshot WHERE id=1")
+                    text(
+                        "SELECT total_capital, peak_capital, daily_pnl, "
+                        "daily_reset_date, open_positions_csv "
+                        "FROM portfolio_snapshot WHERE id=1"
+                    )
                 ).fetchone()
             if row:
                 self.portfolio.total_capital = float(row[0] or 500.0)
                 self.portfolio.peak_capital  = float(row[1] or row[0] or 500.0)
                 self.portfolio.daily_pnl     = float(row[2] or 0.0)
+                # FIX RISK-2 : daily_reset_date peut être str (SQLite) ou date (PostgreSQL)
                 try:
                     stored_date = row[3]
                     if stored_date:
-                        self.portfolio.daily_reset_date = date.fromisoformat(stored_date)
+                        if isinstance(stored_date, date):
+                            self.portfolio.daily_reset_date = stored_date
+                        else:
+                            self.portfolio.daily_reset_date = date.fromisoformat(
+                                str(stored_date)[:10]
+                            )
                 except Exception:
                     pass
                 csv = row[4] or ""
@@ -115,23 +130,49 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """Sauvegarde l'état courant dans portfolio_snapshot (upsert)."""
+        """
+        FIX RISK-1 : UPSERT portable SQLite + PostgreSQL.
+        - Tente un UPDATE WHERE id=1
+        - Si 0 lignes affectées (à la toute première run), fait un INSERT
+        - updated_at passé en paramètre Python (plus de datetime('now') SQLite-only)
+        """
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)
+            now = datetime.utcnow().isoformat()
+            params = {
+                "cap":  self.portfolio.total_capital,
+                "peak": self.portfolio.peak_capital,
+                "dpnl": self.portfolio.daily_pnl,
+                "drd":  self.portfolio.daily_reset_date.isoformat(),
+                "csv":  csv,
+                "now":  now,
+            }
             with engine.connect() as conn:
-                conn.execute(text(
-                    "UPDATE portfolio_snapshot SET "
-                    "total_capital=:cap, peak_capital=:peak, daily_pnl=:dpnl, "
-                    "daily_reset_date=:drd, open_positions_csv=:csv, "
-                    "updated_at=datetime('now') WHERE id=1"
-                ), {
-                    "cap":  self.portfolio.total_capital,
-                    "peak": self.portfolio.peak_capital,
-                    "dpnl": self.portfolio.daily_pnl,
-                    "drd":  self.portfolio.daily_reset_date.isoformat(),
-                    "csv":  csv,
-                })
+                result = conn.execute(
+                    text(
+                        "UPDATE portfolio_snapshot SET "
+                        "total_capital=:cap, peak_capital=:peak, daily_pnl=:dpnl, "
+                        "daily_reset_date=:drd, open_positions_csv=:csv, "
+                        "updated_at=:now WHERE id=1"
+                    ),
+                    params,
+                )
+                if result.rowcount == 0:
+                    # Ligne absente (ne devrait pas arriver après init_db, mais
+                    # on s'en protège pour une sécurité maximale)
+                    conn.execute(
+                        text(
+                            "INSERT INTO portfolio_snapshot "
+                            "(id, total_capital, peak_capital, daily_pnl, "
+                            "daily_reset_date, open_positions_csv, updated_at) "
+                            "VALUES (1, :cap, :peak, :dpnl, :drd, :csv, :now)"
+                        ),
+                        params,
+                    )
+                    logger.warning(
+                        "[RISK] portfolio_snapshot row was missing — inserted seed row."
+                    )
                 conn.commit()
         except Exception as e:
             logger.warning(f"[RISK] Persist error: {e}")
@@ -183,6 +224,8 @@ class RiskManager:
         return TradeDecision(approved=True, amount_usdc=final_amount, kelly_fraction=kelly_fraction)
 
     def _kelly_sizing(self, win_rate: float, price: float) -> float:
+        # FIX RISK-3 : clamp win_rate dans [0, 1] pour éviter kelly > 1 sur whitelist
+        win_rate = max(0.0, min(1.0, win_rate))
         if price <= 0 or price >= 1:
             return 0.01
         b = (1 - price) / price
