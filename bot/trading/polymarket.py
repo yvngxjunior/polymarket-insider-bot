@@ -3,7 +3,6 @@ from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from bot.config import get_settings
-from bot.utils.logger import logger
 
 settings = get_settings()
 

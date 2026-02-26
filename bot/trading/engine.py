@@ -7,7 +7,7 @@ from py_clob_client.order_builder.constants import BUY, SELL
 
 from bot.config import get_settings
 from bot.database import get_db, CopiedTrade, TradeStatus
-from bot.trading.risk import RiskManager, TradeDecision
+from bot.trading.risk import RiskManager
 from bot.utils.logger import logger
 
 settings = get_settings()
