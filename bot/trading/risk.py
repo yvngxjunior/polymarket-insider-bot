@@ -76,6 +76,27 @@ class RiskManager:
       CONVERGENCE_BOOST       Multiplicateur convergence (défaut: 1.5)
     """
 
+    # ── Properties alias → settings.* (zéro hardcode, rétro-compatibilité) ──
+    @property
+    def MAX_POSITIONS(self) -> int:
+        return settings.max_positions
+
+    @property
+    def DAILY_LOSS_LIMIT_PCT(self) -> float:
+        return settings.daily_loss_limit_pct
+
+    @property
+    def DRAWDOWN_LIMIT_PCT(self) -> float:
+        return settings.drawdown_limit_pct
+
+    @property
+    def KELLY_FRACTION(self) -> float:
+        return settings.kelly_fraction
+
+    @property
+    def CONVERGENCE_BOOST(self) -> float:
+        return settings.convergence_boost
+
     def __init__(self, initial_capital: float | None = None):
         if initial_capital is None:
             initial_capital = settings.initial_capital
@@ -125,7 +146,7 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """UPSERT portable SQLite + PostgreSQL. conn.commit() après UPDATE et INSERT."""
+        """UPSERT portable SQLite + PostgreSQL."""
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)

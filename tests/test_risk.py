@@ -2,7 +2,10 @@
 Unit tests — RiskManager
 """
 import pytest
+from bot.config import get_settings
 from bot.trading.risk import RiskManager
+
+settings = get_settings()
 
 
 @pytest.fixture
@@ -33,7 +36,10 @@ def test_duplicate_rejected(rm):
 
 
 def test_max_positions_hit(rm):
-    for i in range(rm.MAX_POSITIONS):
+    """Vérifie que MAX_POSITIONS bloque bien les nouveaux trades.
+    Utilise settings.max_positions (configurable via .env MAX_POSITIONS).
+    """
+    for i in range(settings.max_positions):
         rm.register_position(f"tok_{i}")
     d = rm.evaluate(token_id="new_tok", price=0.50, source_amount=50.0)
     assert not d.approved

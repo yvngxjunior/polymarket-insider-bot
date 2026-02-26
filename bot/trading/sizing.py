@@ -5,11 +5,11 @@ Formule Kelly: f* = (p * (b+1) - 1) / b
   où p = win_rate estimé, b = (1-price)/price
   On applique kelly_fraction_sizer (défaut 0.25 = Quarter-Kelly) pour limiter la variance.
 
-FIX BUG-8: PositionSizer._capital est désormais synchronisé avec
-  RiskManager.portfolio.total_capital avant chaque calcul via sync_capital().
+FIX BUG-8: PositionSizer._capital synchronisé avec RiskManager.portfolio.total_capital
+  avant chaque calcul via sync_capital().
 
 FIX SIZER-1: TIERED_MULTIPLIERS configurable via .env.
-FIX ZERO-HARDCODE: KELLY_FRACTION et MIN_TRADE_USDC lus depuis settings.
+FIX ZERO-HARDCODE: toutes les constantes lues depuis settings.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _DEFAULT_CAPITAL = settings.initial_capital
 @dataclass
 class TieredBand:
     min_usd: float
-    max_usd: float          # float('inf') pour la dernière tranche
+    max_usd: float
     multiplier: float
 
 
@@ -42,8 +42,8 @@ class SizeResult:
 def _parse_tiered_multipliers(raw: str) -> list[TieredBand]:
     """
     Parse la chaîne TIERED_MULTIPLIERS depuis .env.
-    Format: "min-max:mult,min-max:mult,min+:mult"
-    Retourne [] si raw est vide ou invalide → fallback sans tiered.
+    Format: "min-max:mult,min+:mult"
+    Retourne [] si raw est vide ou invalide.
     """
     if not raw or not raw.strip():
         return []
@@ -87,8 +87,21 @@ def _get_tiered_multiplier(
 class PositionSizer:
     """
     Toutes les constantes lues depuis settings (zéro hardcode).
-    KELLY_FRACTION_SIZER et MIN_TRADE_USDC configurables dans .env.
+    Configurables dans .env:
+      KELLY_FRACTION_SIZER  (défaut: 0.25)
+      MIN_TRADE_USDC        (défaut: 2.0)
+      MAX_TRADE_AMOUNT      (défaut: 50.0)
+      TIERED_MULTIPLIERS    (défaut: vide = Kelly pur)
     """
+
+    # ── Properties alias → settings.* (zéro hardcode, rétro-compatibilité) ──
+    @property
+    def MIN_TRADE_USDC(self) -> float:
+        return settings.min_trade_usdc
+
+    @property
+    def KELLY_FRACTION(self) -> float:
+        return settings.kelly_fraction_sizer
 
     def __init__(self, capital_usdc: float = 0.0) -> None:
         self._capital = capital_usdc if capital_usdc > 0 else _DEFAULT_CAPITAL
@@ -104,10 +117,8 @@ class PositionSizer:
             logger.info(f"[SIZER] Tiered multipliers active: {bands_str}")
         else:
             logger.info(
-                f"[SIZER] Tiered multipliers OFF — pure Kelly "
-                f"(KELLY_FRACTION_SIZER={settings.kelly_fraction_sizer}, "
-                f"MIN_TRADE_USDC={settings.min_trade_usdc}) "
-                "| /setcapital pour activer"
+                f"[SIZER] Pure Kelly — KELLY_FRACTION_SIZER={settings.kelly_fraction_sizer} "
+                f"MIN_TRADE_USDC={settings.min_trade_usdc}"
             )
 
     def update_capital(self, capital_usdc: float) -> None:

@@ -2,7 +2,10 @@
 Unit tests — PositionSizer
 """
 import pytest
+from bot.config import get_settings
 from bot.trading.sizing import PositionSizer
+
+settings = get_settings()
 
 
 @pytest.fixture
@@ -12,13 +15,13 @@ def s():
 
 def test_basic_output(s):
     r = s.calculate(yes_price=0.50, conviction_score=0.75)
-    assert r.amount_usdc >= s.MIN_TRADE_USDC
-    assert r.amount_usdc <= 50.0  # max_trade_amount
+    assert r.amount_usdc >= settings.min_trade_usdc
+    assert r.amount_usdc <= settings.max_trade_amount
 
 
 def test_invalid_price_returns_min(s):
     r = s.calculate(yes_price=0.0, conviction_score=0.75)
-    assert r.amount_usdc == s.MIN_TRADE_USDC
+    assert r.amount_usdc == settings.min_trade_usdc
 
 
 def test_higher_conviction_bigger_size(s):
