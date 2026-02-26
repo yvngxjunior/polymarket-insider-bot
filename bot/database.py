@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy import (
     create_engine, Column, String, Float, Boolean,
     Integer, DateTime, Text, ForeignKey, Enum as SAEnum, text
@@ -122,6 +122,13 @@ def init_db() -> None:
     """
     Crée toutes les tables si elles n'existent pas.
     Applique aussi les migrations ALTER TABLE sécurisées.
+
+    FIX DB-1 — Seed portfolio_snapshot row id=1 compatible SQLite + PostgreSQL.
+    L'ancienne version utilisait datetime('now') (SQLite-only) dans le INSERT seed
+    et ne seedait pas la ligne en mode PostgreSQL (la condition
+    "IF NOT EXISTS" était SQLite-only).
+    Nouveau comportement : on vérifie via SELECT puis INSERT si nécessaire,
+    avec updated_at passé en paramètre Python → compat les deux moteurs.
     """
     Base.metadata.create_all(bind=engine)
 
@@ -138,17 +145,26 @@ def init_db() -> None:
                     else:
                         logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
 
-    # Seed de la row portfolio_snapshot si absente
+    # FIX DB-1 — Seed de la row portfolio_snapshot si absente
+    # Compatible SQLite ET PostgreSQL (paramètre Python pour updated_at).
+    today = date.today().isoformat()
+    now = datetime.utcnow().isoformat()
     with engine.connect() as conn:
-        row = conn.execute(text("SELECT id FROM portfolio_snapshot WHERE id=1")).fetchone()
+        row = conn.execute(
+            text("SELECT id FROM portfolio_snapshot WHERE id=1")
+        ).fetchone()
         if row is None:
-            conn.execute(text(
-                "INSERT INTO portfolio_snapshot (id, total_capital, peak_capital, "
-                "daily_pnl, daily_reset_date, open_positions_csv, updated_at) "
-                "VALUES (1, 500.0, 500.0, 0.0, '', '', datetime('now'))"
-            ))
+            conn.execute(
+                text(
+                    "INSERT INTO portfolio_snapshot "
+                    "(id, total_capital, peak_capital, daily_pnl, "
+                    "daily_reset_date, open_positions_csv, updated_at) "
+                    "VALUES (1, 500.0, 500.0, 0.0, :today, '', :now)"
+                ),
+                {"today": today, "now": now},
+            )
             conn.commit()
-            logger.info("[DB] portfolio_snapshot row seeded.")
+            logger.info("[DB] portfolio_snapshot row seeded (id=1).")
 
     logger.info("Database tables initialized.")
 
