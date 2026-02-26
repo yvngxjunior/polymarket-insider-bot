@@ -56,7 +56,23 @@ def get_env_path() -> Path:
     env_path = bot_root / ".env"
     
     if not env_path.exists():
-        raise FileNotFoundError(f".env not found at {env_path}")
+        # Try to find .env in common locations
+        alternative_paths = [
+            Path.cwd() / ".env",
+            Path.cwd().parent / ".env",
+            bot_root.parent / ".env",
+        ]
+        
+        for alt_path in alternative_paths:
+            if alt_path.exists():
+                return alt_path
+        
+        raise FileNotFoundError(
+            f".env not found. Searched locations:\n"
+            f"  - {env_path}\n"
+            f"  - {Path.cwd() / '.env'}\n"
+            f"Please create a .env file at the bot root with required settings."
+        )
     
     return env_path
 
@@ -80,21 +96,33 @@ def parse_env_value(value: str) -> bool | float | int | str:
 
 def read_env_settings() -> BotSettings:
     """Read current settings from .env file."""
-    env_path = get_env_path()
+    try:
+        env_path = get_env_path()
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e)
+        )
     
     # Parse .env
     env_vars = {}
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            
-            if "=" in line:
-                key, value = line.split("=", 1)
-                key = key.strip().lower()
-                value = value.strip()
-                env_vars[key] = parse_env_value(value)
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+                    env_vars[key] = parse_env_value(value)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse .env file: {e}"
+        )
     
     # Map to BotSettings
     try:
@@ -132,11 +160,23 @@ def read_env_settings() -> BotSettings:
 
 def update_env_file(settings: BotSettings) -> None:
     """Update .env file with new settings, preserving comments and order."""
-    env_path = get_env_path()
+    try:
+        env_path = get_env_path()
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=str(e)
+        )
     
     # Read original file to preserve comments
-    with open(env_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read .env file: {e}"
+        )
     
     # Map settings to env key names (uppercase with underscores)
     settings_map = {
@@ -216,13 +256,11 @@ def update_env_file(settings: BotSettings) -> None:
 
 @router.get("", response_model=BotSettings)
 async def get_settings() -> BotSettings:
-    """Get current bot settings from .env file."""
-    try:
-        return read_env_settings()
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read settings: {e}")
+    """Get current bot settings from .env file.
+    
+    Returns 503 if .env file not found with helpful error message.
+    """
+    return read_env_settings()
 
 
 @router.put("", response_model=BotSettings)
@@ -230,6 +268,7 @@ async def update_settings(settings: BotSettings) -> BotSettings:
     """Update bot settings in .env file.
     
     Note: Bot restart required for changes to take effect.
+    Returns 503 if .env file not found.
     """
     try:
         update_env_file(settings)
