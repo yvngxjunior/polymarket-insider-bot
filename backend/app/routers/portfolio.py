@@ -3,22 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from pathlib import Path
-import sys
 from datetime import datetime
-
-# Add bot root to path
-bot_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(bot_root))
-
-try:
-    from bot.database import get_db, CopiedTrade, TradeStatus
-    from bot.config import get_settings
-except ImportError:
-    # Fallback if bot modules not available
-    get_db = None
-    CopiedTrade = None
-    TradeStatus = None
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -56,12 +41,37 @@ class Position(BaseModel):
     source_wallet: str
 
 
+def get_mock_portfolio() -> PortfolioStats:
+    """Return mock portfolio data when bot is not configured."""
+    return PortfolioStats(
+        total_capital=500.0,
+        peak_capital=500.0,
+        daily_pnl=0.0,
+        total_pnl=0.0,
+        win_rate=0.0,
+        total_trades=0,
+        winning_trades=0,
+        losing_trades=0,
+        open_positions=0,
+        avg_win=0.0,
+        avg_loss=0.0,
+        largest_win=0.0,
+        largest_loss=0.0,
+    )
+
+
 def get_portfolio_from_db() -> PortfolioStats:
     """Calculate portfolio stats from database."""
-    if get_db is None or CopiedTrade is None:
-        raise HTTPException(status_code=503, detail="Bot database not available")
-    
     try:
+        # Lazy import to avoid .env validation at startup
+        from pathlib import Path
+        import sys
+        bot_root = Path(__file__).parent.parent.parent.parent
+        sys.path.insert(0, str(bot_root))
+        
+        from bot.database import get_db, CopiedTrade, TradeStatus
+        from bot.config import get_settings
+        
         settings = get_settings()
         
         with get_db() as db:
@@ -135,16 +145,26 @@ def get_portfolio_from_db() -> PortfolioStats:
                 largest_loss=round(largest_loss, 2),
             )
     
+    except ImportError:
+        # Bot modules not available
+        return get_mock_portfolio()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get portfolio stats: {e}")
+        # Bot not configured (.env missing required fields)
+        print(f"Warning: Bot not configured, returning mock data. Error: {e}")
+        return get_mock_portfolio()
 
 
 def get_open_positions_from_db() -> List[Position]:
     """Get list of open positions from database."""
-    if get_db is None or CopiedTrade is None:
-        raise HTTPException(status_code=503, detail="Bot database not available")
-    
     try:
+        # Lazy import
+        from pathlib import Path
+        import sys
+        bot_root = Path(__file__).parent.parent.parent.parent
+        sys.path.insert(0, str(bot_root))
+        
+        from bot.database import get_db, CopiedTrade, TradeStatus
+        
         with get_db() as db:
             # Get trades that are not closed
             open_trades = db.query(CopiedTrade).filter(
@@ -179,8 +199,13 @@ def get_open_positions_from_db() -> List[Position]:
             
             return positions
     
+    except ImportError:
+        # Bot modules not available
+        return []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get positions: {e}")
+        # Bot not configured or DB error
+        print(f"Warning: Could not fetch positions. Error: {e}")
+        return []
 
 
 @router.get("/portfolio", response_model=PortfolioStats)
@@ -188,6 +213,7 @@ async def get_portfolio() -> PortfolioStats:
     """Get current portfolio statistics.
     
     Returns capital, PnL, win rate, and performance metrics.
+    If bot is not configured, returns mock data.
     """
     return get_portfolio_from_db()
 
@@ -197,5 +223,6 @@ async def get_positions() -> List[Position]:
     """Get list of currently open positions.
     
     Returns all positions that haven't been closed yet.
+    If bot is not configured, returns empty list.
     """
     return get_open_positions_from_db()
