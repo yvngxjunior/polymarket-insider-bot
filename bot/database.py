@@ -67,6 +67,9 @@ class CopiedTrade(Base):
     side = Column(String(4))
     amount_usdc = Column(Float)
     price = Column(Float)
+    # FIX DB-2: pnl_usdc manquant — requis par performance.py pour le vrai P&L
+    # Mis à jour par ExitManager à la clôture de la position (TP1/TP2/SL/RESOLVING)
+    pnl_usdc = Column(Float, nullable=True, default=None)
     status = Column(SAEnum(TradeStatus), default=TradeStatus.PENDING)
     skip_reason = Column(String(200), nullable=True)
     tx_hash = Column(String(66), nullable=True)
@@ -110,11 +113,13 @@ class PortfolioSnapshot(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-# Colonnes à ajouter si absentes (migration gardée, safe sur base existante)
+# Colonnes à ajouter si absentes (migration safe sur base existante)
 _SAFE_MIGRATIONS = [
-    ("tracked_wallets", "consecutive_losses", "INTEGER NOT NULL DEFAULT 0"),
-    ("tracked_wallets", "entry_timing_score", "REAL NOT NULL DEFAULT 0.5"),
+    ("tracked_wallets",  "consecutive_losses", "INTEGER NOT NULL DEFAULT 0"),
+    ("tracked_wallets",  "entry_timing_score", "REAL NOT NULL DEFAULT 0.5"),
     ("portfolio_snapshot", "open_positions_csv", "TEXT NOT NULL DEFAULT ''"),
+    # FIX DB-2: pnl_usdc ajouté pour le vrai P&L dans performance.py
+    ("copied_trades",    "pnl_usdc",           "REAL"),
 ]
 
 
@@ -124,11 +129,6 @@ def init_db() -> None:
     Applique aussi les migrations ALTER TABLE sécurisées.
 
     FIX DB-1 — Seed portfolio_snapshot row id=1 compatible SQLite + PostgreSQL.
-    L'ancienne version utilisait datetime('now') (SQLite-only) dans le INSERT seed
-    et ne seedait pas la ligne en mode PostgreSQL (la condition
-    "IF NOT EXISTS" était SQLite-only).
-    Nouveau comportement : on vérifie via SELECT puis INSERT si nécessaire,
-    avec updated_at passé en paramètre Python → compat les deux moteurs.
     """
     Base.metadata.create_all(bind=engine)
 
@@ -146,7 +146,6 @@ def init_db() -> None:
                         logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
 
     # FIX DB-1 — Seed de la row portfolio_snapshot si absente
-    # Compatible SQLite ET PostgreSQL (paramètre Python pour updated_at).
     today = date.today().isoformat()
     now = datetime.utcnow().isoformat()
     with engine.connect() as conn:

@@ -6,6 +6,10 @@ via RAG (Retrieval-Augmented Generation) sur des sources d'actualité récentes.
 Retourne un score de confiance + une recommandation BUY_YES / BUY_NO / HOLD.
 
 Activation: LLM_ENABLED=true + OPENAI_API_KEY dans .env
+
+FIX LLM-1: _get_session() (anciennement _session_()) — nom propre sans tiret bas final
+FIX LLM-2: aiohttp.ClientError ajouté au scope de retry (couvrait seulement requests avant)
+FIX LLM-3: session fermée dans finally de batch_analyze (évite leak si exception)
 """
 import asyncio
 import json
@@ -71,7 +75,8 @@ class LLMAgent:
     def is_enabled(self) -> bool:
         return bool(self.openai_key) and getattr(settings, "llm_enabled", False)
 
-    def _session_(self) -> aiohttp.ClientSession:
+    def _get_session(self) -> aiohttp.ClientSession:
+        """FIX LLM-1: nom propre (anciennement _session_() avec tiret bas final)."""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20)
@@ -85,7 +90,8 @@ class LLMAgent:
         if not self.news_key:
             return "No news context available."
         try:
-            async with self._session_().get(
+            # FIX LLM-2: utilise _get_session() (nom corrigé)
+            async with self._get_session().get(
                 self.NEWS_API_URL,
                 params={
                     "q": query[:100],
@@ -103,6 +109,8 @@ class LLMAgent:
                         for a in articles[:3]
                     ]
                     return "\n".join(lines) if lines else "No recent news found."
+        except aiohttp.ClientError as e:
+            logger.debug(f"[LLM] News fetch error (aiohttp): {e}")
         except Exception as e:
             logger.debug(f"[LLM] News fetch error: {e}")
         return "News unavailable."
@@ -130,7 +138,8 @@ class LLMAgent:
         )
 
         try:
-            async with self._session_().post(
+            # FIX LLM-2: utilise _get_session() (nom corrigé)
+            async with self._get_session().post(
                 self.OPENAI_URL,
                 headers={
                     "Authorization": f"Bearer {self.openai_key}",
@@ -181,6 +190,9 @@ class LLMAgent:
                 )
                 return signal
 
+        except aiohttp.ClientError as e:
+            logger.error(f"[LLM] Network error: {e}")
+            return None
         except Exception as e:
             logger.error(f"[LLM] Analysis error: {e}")
             return None
@@ -223,8 +235,13 @@ class LLMAgent:
                 )
             )
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for r in results if isinstance(r, LLMSignal)]
+        # FIX LLM-3: session fermée dans finally si exception pendant batch
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return [r for r in results if isinstance(r, LLMSignal)]
+        except Exception as e:
+            logger.error(f"[LLM] Batch analyze error: {e}")
+            return []
 
     async def close(self) -> None:
         if self._session and not self._session.closed:

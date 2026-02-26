@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_DOWN
 from functools import wraps
 from typing import Callable, Any
 
+import aiohttp
 import requests
 from tenacity import (
     retry,
@@ -17,13 +18,22 @@ from bot.utils.logger import logger
 def retry_on_failure(max_attempts: int = 3, wait_min: float = 1.0, wait_max: float = 10.0):
     """
     Décorateur de retry avec backoff exponentiel.
+    FIX HELPERS-1: ajoute aiohttp.ClientError + aiohttp.ServerTimeoutError
+    L'ancienne version ne couvrait que requests.RequestException
+    -> les appels aiohttp (OpenAI, NewsAPI, Polymarket) n'étaient jamais retentés.
     Usage: @retry_on_failure(max_attempts=3)
     """
     return retry(
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=1, min=wait_min, max=wait_max),
         retry=retry_if_exception_type(
-            (requests.RequestException, ConnectionError, TimeoutError)
+            (
+                requests.RequestException,
+                ConnectionError,
+                TimeoutError,
+                aiohttp.ClientError,          # FIX HELPERS-1: couvre aiohttp
+                aiohttp.ServerTimeoutError,   # FIX HELPERS-1: timeout aiohttp
+            )
         ),
         before_sleep=lambda retry_state: logger.warning(
             f"Retry {retry_state.attempt_number}/{max_attempts} — "
@@ -33,14 +43,22 @@ def retry_on_failure(max_attempts: int = 3, wait_min: float = 1.0, wait_max: flo
 
 
 def safe_async(coro_func: Callable) -> Callable:
-    """Wrapper pour capturer les exceptions dans les coroutines async sans planter le bot."""
+    """
+    Wrapper pour capturer les exceptions dans les coroutines async sans planter le bot.
+    FIX HELPERS-2: log clair avec nom de la fonction ET type d'exception
+    L'ancienne version loggait seulement le message sans le nom de la fonction
+    -> difficile à débugger quand plusieurs fonctions utilisent @safe_async
+    """
 
     @wraps(coro_func)
     async def wrapper(*args, **kwargs) -> Any:
         try:
             return await coro_func(*args, **kwargs)
         except Exception as e:
-            logger.error(f"Unhandled error in {coro_func.__name__}: {e}")
+            logger.error(
+                f"[safe_async] Unhandled {type(e).__name__} in "
+                f"{coro_func.__module__}.{coro_func.__name__}: {e}"
+            )
             return None
 
     return wrapper
@@ -71,12 +89,12 @@ def score_wallet(
 def get_score_label(score: float) -> str:
     """Convertit le score numérique en label A/B/C/D."""
     if score >= 75:
-        return "🟢 A (Elite)"
+        return "\U0001f7e2 A (Elite)"
     elif score >= 55:
-        return "🔵 B (Good)"
+        return "\U0001f535 B (Good)"
     elif score >= 35:
-        return "🟡 C (Average)"
-    return "🔴 D (Weak)"
+        return "\U0001f7e1 C (Average)"
+    return "\U0001f534 D (Weak)"
 
 
 async def sleep_with_log(seconds: float, reason: str = "") -> None:
