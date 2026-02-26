@@ -1,4 +1,6 @@
+import asyncio
 from datetime import datetime
+from functools import partial
 from typing import Optional
 
 from py_clob_client.client import ClobClient
@@ -15,25 +17,21 @@ settings = get_settings()
 
 class TradingEngine:
     """
-    Exécute les trades sur Polymarket via le CLOB.
-    DRY_RUN=True  → simulation uniquement (log + DB)
-    DRY_RUN=False → ordres signés et envoyés sur Polygon
+    Execute les trades sur Polymarket via le CLOB.
+    DRY_RUN=True  -> simulation uniquement (log + DB)
+    DRY_RUN=False -> ordres signes et envoyes sur Polygon
 
-    FIX P0: le RiskManager est désormais injecté depuis main.py (instance partagée).
-    L'ancienne version créait son propre RiskManager interne isolé → les limites
-    daily loss, drawdown et max_positions n'étaient jamais appliquées en LIVE.
-
-    FIX ENGINE-1: copy_trade() retourne None (pas le record FAILED) en cas d'exception
-    → main.py ne peut plus appeler register_position() sur un trade raté.
-
+    FIX P0:      RiskManager injecte depuis main.py (instance partagee).
+    FIX ENGINE-1: copy_trade() retourne None en cas d'exception CLOB
+                  -> main.py ne fait plus register_position() sur FAILED.
     FIX ENGINE-2: close_position() guard entry_price <= 0 avant division.
-
-    FIX ENGINE-3: tx_hash manquant → "MISSING_TX" + warning au lieu de string vide
-    silencieuse + log corrigé (tx_hash or "")[:12] pour éviter TypeError.
+    FIX ENGINE-3: tx_hash manquant -> 'MISSING_TX' + warning.
+    FIX ENGINE-4: create_market_order() + post_order() sont synchrones
+                  (py-clob-client). Executes dans run_in_executor pour
+                  ne pas bloquer l'event loop asyncio pendant la requete HTTP.
     """
 
     def __init__(self, risk_manager: RiskManager):
-        # FIX P0: plus de self.risk = RiskManager() isolé — on reçoit l'instance globale
         self.risk = risk_manager
         self._client: Optional[ClobClient] = None
 
@@ -52,6 +50,29 @@ class TradingEngine:
                 raise
         return self._client
 
+    async def _clob_submit(
+        self, order_args: MarketOrderArgs
+    ) -> dict:
+        """
+        FIX ENGINE-4: wrappe les deux appels synchrones CLOB dans run_in_executor
+        pour eviter de bloquer l'event loop asyncio.
+        create_market_order() signe l'ordre (CPU-bound + crypto),
+        post_order() envoie la requete HTTP (I/O-bound bloquant).
+        Les deux sont delegues au thread pool par defaut.
+        """
+        loop = asyncio.get_event_loop()
+        client = self._get_client()
+
+        # Etape 1: signature (synchrone, CPU)
+        signed_order = await loop.run_in_executor(
+            None, partial(client.create_market_order, order_args)
+        )
+        # Etape 2: envoi HTTP (synchrone, I/O bloquant)
+        response = await loop.run_in_executor(
+            None, partial(client.post_order, signed_order)
+        )
+        return response
+
     async def copy_trade(
         self,
         source_wallet: str,
@@ -62,9 +83,6 @@ class TradingEngine:
         market_question: str = "",
         market_id: str = "",
     ) -> Optional[CopiedTrade]:
-        # NOTE: main.py appelle déjà risk_manager.evaluate() avant copy_trade().
-        # On n'appelle PAS self.risk.evaluate() ici pour éviter la double évaluation
-        # sur la même instance. Le trade est supposé approuvé à ce stade.
         trade_record = CopiedTrade(
             source_wallet_address=source_wallet, market_id=market_id,
             market_question=market_question, token_id=token_id,
@@ -76,22 +94,21 @@ class TradingEngine:
             trade_record.skip_reason = "DRY_RUN"
             trade_record.executed_at = datetime.utcnow()
             logger.info(
-                f"🟡 [DRY RUN] Would {side} ${source_amount} USDC "
+                f"[DRY RUN] Would {side} ${source_amount} USDC "
                 f"on {market_question[:50] or token_id[:20]}... @ {price:.3f}"
             )
             self._save_trade(trade_record)
             return trade_record
 
         try:
-            client = self._get_client()
             side_const = BUY if side.upper() == "BUY" else SELL
             order_args = MarketOrderArgs(
                 token_id=token_id, amount=source_amount, side=side_const,
             )
-            signed_order = client.create_market_order(order_args)
-            response = client.post_order(signed_order)
+            # FIX ENGINE-4: appel non-bloquant via run_in_executor
+            response = await self._clob_submit(order_args)
 
-            # FIX ENGINE-3: tx_hash manquant → warning explicite au lieu de string vide
+            # FIX ENGINE-3: tx_hash manquant -> warning explicite
             tx_hash = response.get("orderID") or "MISSING_TX"
             if tx_hash == "MISSING_TX":
                 logger.warning(
@@ -102,9 +119,8 @@ class TradingEngine:
             trade_record.status = TradeStatus.EXECUTED
             trade_record.tx_hash = tx_hash
             trade_record.executed_at = datetime.utcnow()
-            # register_position est appelé dans main.py après copy_trade()
             logger.success(
-                f"✅ Trade EXECUTED: {side} ${source_amount} USDC "
+                f"Trade EXECUTED: {side} ${source_amount} USDC "
                 f"on {market_question[:40] or token_id[:20]}... | TX: {(tx_hash or '')[:12]}..."
             )
         except Exception as e:
@@ -112,8 +128,7 @@ class TradingEngine:
             trade_record.skip_reason = str(e)[:200]
             logger.error(f"Trade FAILED: {e} | token={token_id[:20]}...")
             self._save_trade(trade_record)
-            # FIX ENGINE-1: retour None → main.py ne peut PAS appeler
-            # register_position() sur un trade raté (plus de position fantôme)
+            # FIX ENGINE-1: retour None -> main.py ne fait pas register_position()
             return None
 
         self._save_trade(trade_record)
@@ -126,7 +141,7 @@ class TradingEngine:
         amount_usdc: float,
         market_question: str = "",
     ) -> bool:
-        # FIX ENGINE-2: guard entry_price <= 0 avant division → évite ordre invalide
+        # FIX ENGINE-2: guard entry_price <= 0 avant division
         if entry_price <= 0:
             logger.error(
                 f"[ENGINE] close_position aborted: invalid entry_price={entry_price} "
@@ -135,7 +150,6 @@ class TradingEngine:
             return False
 
         shares_to_sell = round(amount_usdc / entry_price, 4)
-
         if shares_to_sell <= 0:
             logger.error(
                 f"[ENGINE] close_position aborted: computed 0 shares "
@@ -147,21 +161,20 @@ class TradingEngine:
 
         if settings.dry_run:
             logger.info(
-                f"🟡 [DRY RUN] Would SELL {shares_to_sell} shares "
+                f"[DRY RUN] Would SELL {shares_to_sell} shares "
                 f"(~${amount_usdc:.2f}) on {label}..."
             )
             return True
 
         try:
-            client = self._get_client()
             order_args = MarketOrderArgs(
                 token_id=token_id, amount=shares_to_sell, side=SELL,
             )
-            signed_order = client.create_market_order(order_args)
-            response = client.post_order(signed_order)
+            # FIX ENGINE-4: appel non-bloquant via run_in_executor
+            response = await self._clob_submit(order_args)
             tx_hash = response.get("orderID") or "MISSING_TX"
             logger.success(
-                f"✅ Position CLOSED: SELL {shares_to_sell} shares "
+                f"Position CLOSED: SELL {shares_to_sell} shares "
                 f"on {label}... | TX: {(tx_hash or '')[:12]}..."
             )
             return True
