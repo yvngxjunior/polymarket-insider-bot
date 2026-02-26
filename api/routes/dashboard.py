@@ -2,10 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from datetime import datetime, timedelta
-from typing import List
 
-from bot.database import get_db
-from bot.models import Wallet, Trade, Position
+from bot.database import get_db, TrackedWallet, CopiedTrade, PortfolioSnapshot
 
 router = APIRouter()
 
@@ -14,68 +12,74 @@ async def get_dashboard(db: Session = Depends(get_db)):
     """Real-time dashboard data from database"""
     
     # === LIVE STATUS ===
-    now = datetime.now()
+    now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Total PnL (sum all closed trades)
-    total_pnl = db.query(func.sum(Trade.profit_loss)).filter(
-        Trade.exit_price.isnot(None)
-    ).scalar() or 0.0
+    # Get portfolio snapshot
+    portfolio = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == 1).first()
+    total_capital = portfolio.total_capital if portfolio else 500.0
+    daily_pnl = portfolio.daily_pnl if portfolio else 0.0
     
-    # Daily PnL (trades closed today)
-    daily_pnl = db.query(func.sum(Trade.profit_loss)).filter(
-        Trade.exit_price.isnot(None),
-        Trade.exit_time >= today_start
+    # Total PnL (from all executed trades)
+    total_pnl_trades = db.query(func.sum(CopiedTrade.pnl_usdc)).filter(
+        CopiedTrade.pnl_usdc.isnot(None)
     ).scalar() or 0.0
+    total_pnl = total_capital - 500.0  # Initial capital was 500
     
     # Last trade timestamp
-    last_trade = db.query(Trade).order_by(desc(Trade.entry_time)).first()
-    last_trade_ts = int(last_trade.entry_time.timestamp()) if last_trade else int(now.timestamp()) - 3600
+    last_trade = db.query(CopiedTrade).order_by(desc(CopiedTrade.created_at)).first()
+    last_trade_ts = int(last_trade.created_at.timestamp()) if last_trade else int(now.timestamp()) - 3600
     
     # Mock RPC/Gas for now (TODO: add real monitoring)
-    rpc_latency = 42  # ms
-    gas_price = 35    # gwei
-    wallet_balance = 5000.0  # USDC (TODO: fetch from wallet)
+    rpc_latency = 42
+    gas_price = 35
     
     live_status = {
-        "botActive": True,  # TODO: check bot process status
+        "botActive": True,
         "totalPnL": round(total_pnl, 2),
         "dailyPnL": round(daily_pnl, 2),
         "rpcLatency": rpc_latency,
         "gasPrice": gas_price,
-        "walletBalance": wallet_balance,
+        "walletBalance": round(total_capital, 2),
         "lastTradeTimestamp": last_trade_ts
     }
     
     # === TARGETS (Tracked Wallets) ===
-    wallets = db.query(Wallet).filter(Wallet.is_active == True).all()
-    targets = []
+    wallets = db.query(TrackedWallet).filter(
+        TrackedWallet.is_active == True
+    ).order_by(desc(TrackedWallet.score)).limit(10).all()
     
-    for wallet in wallets[:10]:  # Limit to 10 most active
-        # Calculate wallet stats
-        trades = db.query(Trade).filter(
-            Trade.wallet_address == wallet.address,
-            Trade.exit_price.isnot(None)
+    targets = []
+    for wallet in wallets:
+        # Get wallet trades
+        trades = db.query(CopiedTrade).filter(
+            CopiedTrade.source_wallet_address == wallet.address,
+            CopiedTrade.status.in_(["executed", "EXECUTED"])
         ).all()
         
         total_trades = len(trades)
-        winning_trades = len([t for t in trades if t.profit_loss and t.profit_loss > 0])
-        winrate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+        winning_trades = len([t for t in trades if t.pnl_usdc and t.pnl_usdc > 0])
+        winrate = (winning_trades / total_trades * 100) if total_trades > 0 else wallet.win_rate * 100
         
         # ROI 7d
         week_ago = now - timedelta(days=7)
-        recent_pnl = sum([t.profit_loss or 0 for t in trades if t.exit_time and t.exit_time >= week_ago])
-        roi_7d = (recent_pnl / wallet.total_volume * 100) if wallet.total_volume > 0 else 0.0
+        recent_trades = [t for t in trades if t.executed_at and t.executed_at >= week_ago]
+        recent_pnl = sum([t.pnl_usdc or 0 for t in recent_trades])
+        recent_volume = sum([t.amount_usdc or 0 for t in recent_trades])
+        roi_7d = (recent_pnl / recent_volume * 100) if recent_volume > 0 else 0.0
         
         # Volume 24h
         day_ago = now - timedelta(days=1)
-        volume_24h = sum([t.size or 0 for t in trades if t.entry_time >= day_ago])
+        volume_24h = sum([t.amount_usdc or 0 for t in trades if t.created_at >= day_ago])
         
         # Last trade age
-        last_wallet_trade = db.query(Trade).filter(
-            Trade.wallet_address == wallet.address
-        ).order_by(desc(Trade.entry_time)).first()
-        last_trade_age = int((now - last_wallet_trade.entry_time).total_seconds()) if last_wallet_trade else 3600
+        last_wallet_trade = db.query(CopiedTrade).filter(
+            CopiedTrade.source_wallet_address == wallet.address
+        ).order_by(desc(CopiedTrade.created_at)).first()
+        last_trade_age = int((now - last_wallet_trade.created_at).total_seconds()) if last_wallet_trade else 3600
+        
+        # Avg position size from recent trades
+        avg_size = sum([t.amount_usdc for t in trades[-10:]]) / len(trades[-10:]) if trades else 0
         
         targets.append({
             "address": wallet.address,
@@ -83,43 +87,42 @@ async def get_dashboard(db: Session = Depends(get_db)):
             "winrate": round(winrate, 1),
             "roi7d": round(roi_7d, 1),
             "volume24h": int(volume_24h),
-            "avgPositionSize": int(wallet.avg_position_size or 0),
+            "avgPositionSize": int(avg_size),
             "lastTradeAge": last_trade_age,
             "isActive": wallet.is_active,
-            "riskAlert": roi_7d < -10  # Alert if losing >10% this week
+            "riskAlert": roi_7d < -10 or wallet.consecutive_losses >= 3
         })
     
-    # === ACTIVE POSITIONS ===
-    open_positions = db.query(Position).filter(
-        Position.status == "open"
-    ).order_by(desc(Position.entry_time)).all()
+    # === ACTIVE POSITIONS (Pending trades) ===
+    pending_trades = db.query(CopiedTrade).filter(
+        CopiedTrade.status.in_(["pending", "PENDING"])
+    ).order_by(desc(CopiedTrade.created_at)).limit(20).all()
     
     positions = []
-    for pos in open_positions[:20]:  # Limit to 20 most recent
-        # Calculate current P/L (mock current price for now)
-        entry_price = pos.entry_price or 0.0
-        current_price = entry_price * 1.05  # TODO: fetch real current price from Polymarket API
-        pnl = (current_price - entry_price) * (pos.size or 0)
-        if pos.side == "NO":
+    for trade in pending_trades:
+        # Mock current price (TODO: fetch from Polymarket API)
+        entry_price = trade.price or 0.5
+        current_price = entry_price * 1.02  # Assume +2% for demo
+        pnl = (current_price - entry_price) * (trade.amount_usdc or 0) / entry_price
+        if trade.side == "NO":
             pnl = -pnl
         
-        age_seconds = int((now - pos.entry_time).total_seconds())
+        age_seconds = int((now - trade.created_at).total_seconds())
         
         positions.append({
-            "id": f"pos_{pos.id}",
-            "market": pos.market_name or "Unknown Market",
-            "side": pos.side or "YES",
+            "id": f"pos_{trade.id}",
+            "market": trade.market_question or f"Market {trade.market_id[:20]}...",
+            "side": trade.side or "YES",
             "entryPrice": round(entry_price, 2),
             "currentPrice": round(current_price, 2),
             "pnl": round(pnl, 2),
-            "probability": round(current_price, 2),  # Current price = probability
+            "probability": round(current_price, 2),
             "ageSeconds": age_seconds,
-            "slippage": round((pos.slippage or 0) * 100, 1),
+            "slippage": 0.5,  # Mock
             "canCashOut": True
         })
     
     # === RISK SETTINGS ===
-    # TODO: Load from config or DB
     risk_settings = {
         "positionSizing": {"mode": "fixed", "amount": 500},
         "maxSlippage": 2.0,
@@ -127,31 +130,36 @@ async def get_dashboard(db: Session = Depends(get_db)):
         "stopLoss": {"enabled": True, "dailyLimit": -200, "perTrade": -15}
     }
     
-    # === ALERTS (Recent trades/events) ===
-    recent_trades = db.query(Trade).order_by(desc(Trade.entry_time)).limit(10).all()
-    alerts = []
+    # === ALERTS (Recent trades) ===
+    recent_trades = db.query(CopiedTrade).order_by(
+        desc(CopiedTrade.created_at)
+    ).limit(10).all()
     
+    alerts = []
     for trade in recent_trades:
-        if trade.exit_price:  # Closed trade
-            level = "success" if (trade.profit_loss or 0) > 0 else "error"
-            msg = f"{'PROFIT' if level == 'success' else 'LOSS'}: Sold {trade.side} '{trade.market_slug[:30]}' ${abs(trade.profit_loss or 0):.2f}"
-        else:  # Open trade
+        if trade.status.value == "executed" and trade.pnl_usdc is not None:
+            level = "success" if trade.pnl_usdc > 0 else "error"
+            msg = f"{'PROFIT' if level == 'success' else 'LOSS'}: {trade.side} '{trade.market_question[:40] if trade.market_question else 'Market'}' ${abs(trade.pnl_usdc):.2f}"
+        elif trade.status.value == "skipped":
+            level = "warning"
+            msg = f"TRADE SKIPPED: {trade.skip_reason or 'Unknown reason'}"
+        else:
             level = "success"
-            msg = f"TRADE EXECUTED: Bought {trade.side} '{trade.market_slug[:30]}' ${trade.size or 0:.0f} @{trade.entry_price:.2f}"
+            msg = f"TRADE EXECUTED: {trade.side} ${trade.amount_usdc:.0f} @{trade.price:.2f}"
         
         alerts.append({
-            "timestamp": int(trade.entry_time.timestamp()),
+            "timestamp": int(trade.created_at.timestamp()),
             "level": level,
             "message": msg
         })
     
-    # Add system alerts if no trades
+    # Fallback if no trades
     if not alerts:
         alerts = [
             {
                 "timestamp": int(now.timestamp()) - 60,
                 "level": "warning",
-                "message": "No recent trades found. Start bot with: python main.py"
+                "message": "No trades found. Start bot: python main.py"
             }
         ]
     
