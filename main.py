@@ -1,9 +1,9 @@
 """
-PolyInsider Bot v2.8
+PolyInsider Bot v2.9
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
-  2. Convergence scan   — plusieurs insiders sur même marché (via ConvergenceDetector)
+  2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
@@ -13,42 +13,18 @@ Architecture 7 phases + 3 background tasks:
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
 
-v2.6 fixes:
-  - FIX BUG-1  PositionManager ne touche plus au RiskManager
-  - FIX BUG-2  _partial_sold persisté en DB
-  - FIX BUG-3  ConvergenceDetector._recent_trades nettoyé périodiquement
-  - FIX BUG-4  /status lit risk_manager.portfolio
-  - FIX BUG-5  /pnl lit daily_pnl depuis RiskManager.portfolio
-  - FIX BUG-6  /whitelist /blacklist persist via DB
-  - FIX BUG-7  PositionManager.start_monitoring() désactivé
-  - FIX BUG-8  sizer.sync_capital(risk_manager) avant chaque calculate()
-  - FIX BUG-9  get_top_traders() retry par page
-  - FIX M2    convergence confidence non divisé par 100
-  - FIX M3    exit_manager filtre CLOSED%
-
-v2.7 fixes:
-  - FIX EXIT-1  exit_manager filtre unifié DRY_RUN+LIVE
-  - FIX EXIT-2  _get_current_price utilise trade.side
-  - FIX EXIT-3  guard trade.id is None
-  - FIX ENGINE-6  slash manquant dans URL /book
-  - FIX ENGINE-7  close_position passait shares au lieu d'USDC
-  - FIX RISK-4  market_volume_usdc=0.0 par défaut
-  - FIX INSIDER-1  _safe_float() + _known_trades dedup + Semaphore(20)
-  - FIX WHALE-1/2/3  deque FIFO + batch DB + _safe_float()
-  - FIX REFRESHER-1/2  _known_wallets chargé depuis DB + discovery immédiat
-  - FIX PM-1  rechargement DB au démarrage
-  - FIX CONV-1/2  timestamp ms→s + safe_float
-  - FIX ENGINE-4/5  run_in_executor + order book réel
-  - FIX MAIN-1  whale scan throttlé toutes les 4 boucles
-  - FIX SIZER-1  TIERED_MULTIPLIERS via .env
-  - FEAT SIZER-2  /setcapital hot-reload
-
 v2.8 fixes:
-  - FIX MAIN-2   float(None) crash dans process_new_trade → _safe_float()
-  - FIX MAIN-3   refresher.stop() absent du shutdown → ajout dans gather()
-  - FIX CMD-1    settings mutation Pydantic v2 → object.__setattr__()
-  - FIX INSIDER-4 get_new_trades() sans timeout → asyncio.wait_for 6s/wallet
-  - IMPROV-8     process_new_trade envelopé dans try/except non bloquant
+  - FIX MAIN-2/3   float(None) crash + refresher.stop() manquant
+  - FIX CMD-1      settings mutation Pydantic v2
+  - FIX INSIDER-4  get_new_trades() timeout par wallet
+  - IMPROV-8       process_new_trade enveloppé dans try/except
+
+v2.9 fixes:
+  - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
+  - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
+  - FIX RISK-6     INSERT portfolio_snapshot jamais commité
+  - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
+  - FIX FILTER-1   rate-limit query status case-sensitive
 """
 import asyncio
 import signal
@@ -101,8 +77,6 @@ async def process_new_trade(
     convergence_detector: ConvergenceDetector,
 ) -> None:
     token_id     = trade.get("asset", "")
-    # FIX MAIN-2: _safe_float() au lieu de float() direct
-    # float(None) -> TypeError non catchée quand l'API retourne null
     price        = _safe_float(trade.get("price"), 0.0)
     amount       = _safe_float(trade.get("usdcSize"), 0.0)
     side         = trade.get("side", "BUY").upper()
@@ -121,6 +95,8 @@ async def process_new_trade(
     is_whitelisted = wallet_address.lower() in whitelist
     effective_score = 1.0 if is_whitelisted else wallet_score
 
+    # FIX CONV-3: détection convergence + flag passé à risk_manager
+    is_convergence = False
     if token_id and condition_id and timestamp > 0:
         try:
             conv_signal = await convergence_detector.process_trade(
@@ -133,6 +109,7 @@ async def process_new_trade(
                 timestamp=timestamp,
             )
             if conv_signal:
+                is_convergence = True
                 logger.info(
                     f"[CONV] {conv_signal.strength} — "
                     f"{conv_signal.wallet_count} insiders on {token_id[:16]}... "
@@ -163,6 +140,7 @@ async def process_new_trade(
     decision = risk_manager.evaluate(
         token_id=token_id, price=price,
         source_amount=amount, wallet_win_rate=effective_score,
+        is_convergence_signal=is_convergence,
     )
     if not decision.approved:
         logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
@@ -175,7 +153,6 @@ async def process_new_trade(
     market_info = await client.get_market_info(condition_id) if condition_id else None
     question    = market_info.get("question", "") if market_info else ""
 
-    # FIX BUG-8: synchronise le capital avant chaque calcul de sizing
     sizer.sync_capital(risk_manager)
     size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
@@ -277,8 +254,6 @@ async def main_loop(
                 await asyncio.sleep(settings.scan_interval)
                 continue
 
-            # FIX INSIDER-4: chaque get_new_trades est limité à 6s
-            # pour éviter de bloquer tout le gather si un wallet est lent.
             async def _safe_get_trades(addr: str) -> list:
                 try:
                     return await asyncio.wait_for(
@@ -296,8 +271,6 @@ async def main_loop(
             )
             for (addr, score, losses, timing), trades in zip(wallet_data, all_trades):
                 for trade in trades:
-                    # IMPROV-8: enveloppe non bloquante — une exception sur un
-                    # trade n'arrête pas le traitement des trades suivants.
                     try:
                         await process_new_trade(
                             trade=trade,
@@ -385,7 +358,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.8")
+    logger.info("  PolyInsider Bot v2.9")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -397,6 +370,7 @@ async def run() -> None:
     logger.info("  Health monitor:           ON 🟩")
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
+    logger.info("  Convergence boost (x1.5): ON 🔥")
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -497,8 +471,6 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
 
-    # FIX MAIN-3: refresher.stop() ajouté — était absent, la tâche
-    # background WalletRefresher restait zombie à l'arrêt du bot.
     await asyncio.gather(
         refresher.stop(),
         exit_manager.stop(),

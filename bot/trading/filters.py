@@ -2,21 +2,20 @@
 Conviction Filter
 
 Filtre multi-critères avant exécution d'un trade copié:
-  1. Taille minimale du bet source  (conviction de l'insider)
-  2. Plage de prix valide           (évite les marchés quasi-résolus)
-  3. Score minimal du wallet source (win_rate historique)
-  4. Rate-limit par marché          (anti-spam, max N copies/heure)
-  5. Losing streak protection       (skip si wallet en série de pertes)
-  6. Score de timing d'entrée       (skip si wallet entre trop tard)
+  1. Taille minimale du bet source
+  2. Plage de prix valide
+  3. Score minimal du wallet source
+  4. Rate-limit par marché (anti-spam, max N copies/heure)
+  5. Losing streak protection
+  6. Score de timing d'entrée
 
-Tous les seuils sont configurables via .env.
-
-FIX #3 — _market_copies : nettoyage borné toutes les N évaluations pour
-         éviter le leak mémoire sur run longue durée.
-FIX #5 — Poids de scoring normalisés correctement quelle que soit
-         la présence ou absence de market_id.
-FIX #8 — rate-limit chargé depuis DB au démarrage pour survivre
-         aux redémarrages du process.
+FIX #3        — _market_copies : nettoyage borné toutes les N évaluations.
+FIX #5        — Poids de scoring normalisés correctement.
+FIX #8        — rate-limit chargé depuis DB au démarrage.
+FIX FILTER-1  — query rate-limit : status='executed' → LIKE '%EXECUTED%'
+  Avant: status='executed' (lowercase) ne matchait pas TradeStatus.EXECUTED
+  qui peut être stocké comme 'EXECUTED' (majuscules) ou comme int selon le dialecte.
+  Après: status LIKE '%EXECUTED%' (case-insensitive, robuste).
 """
 from collections import defaultdict
 from dataclasses import dataclass
@@ -27,7 +26,6 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
-# Nettoyage du cache rate-limit toutes les N évaluations (anti-leak mémoire)
 _CLEANUP_EVERY = 500
 
 
@@ -39,10 +37,6 @@ class FilterResult:
 
 
 class ConvictionFilter:
-    """
-    Applique une série de filtres rapides (synchrones) avant de déclencher
-    la logique de risque et d'exécution.
-    """
 
     _DEFAULT_MIN_BET   = 50.0
     _DEFAULT_MIN_SCORE = 0.65
@@ -59,20 +53,15 @@ class ConvictionFilter:
         self.min_score: float = getattr(settings, "min_wallet_score", self._DEFAULT_MIN_SCORE)
         self.max_price: float = settings.max_price
         self.min_price: float = settings.min_price
-        # FIX #3 — dict borné + compteur de nettoyage
         self._market_copies: dict[str, list[datetime]] = defaultdict(list)
         self._eval_count: int = 0
-        # FIX #8 — charge le state du rate-limit depuis la DB au démarrage
         self._load_rate_limit_from_db()
-
-    # ------------------------------------------------------------------
-    # FIX #8 — Persistance rate-limit (survie aux redémarrages)
-    # ------------------------------------------------------------------
 
     def _load_rate_limit_from_db(self) -> None:
         """
-        Recharge les timestamps de copies récentes (< 1h) depuis copied_trades.
-        Ainsi le rate-limit de 3/heure n'est pas bypassable par un restart.
+        FIX FILTER-1: status LIKE '%EXECUTED%' au lieu de ='executed'.
+        TradeStatus.EXECUTED peut être stocké comme 'EXECUTED' (majuscules)
+        ou comme entier selon le dialecte SQLAlchemy.
         """
         try:
             from bot.database import engine
@@ -82,7 +71,7 @@ class ConvictionFilter:
                 rows = conn.execute(
                     text(
                         "SELECT market_id, executed_at FROM copied_trades "
-                        "WHERE executed_at >= :cutoff AND status='executed'"
+                        "WHERE executed_at >= :cutoff AND status LIKE '%EXECUTED%'"
                     ),
                     {"cutoff": cutoff}
                 ).fetchall()
@@ -102,10 +91,6 @@ class ConvictionFilter:
             logger.debug(f"[FILTER] Rate-limit DB load skipped: {e}")
 
     def _maybe_cleanup(self) -> None:
-        """
-        FIX #3 — Purge les entrées expirées toutes les _CLEANUP_EVERY évaluations.
-        Borne la mémoire de _market_copies sur runs longue durée.
-        """
         self._eval_count += 1
         if self._eval_count % _CLEANUP_EVERY != 0:
             return
@@ -118,10 +103,6 @@ class ConvictionFilter:
             del self._market_copies[k]
         if stale_keys:
             logger.debug(f"[FILTER] Cleaned {len(stale_keys)} stale rate-limit keys")
-
-    # ------------------------------------------------------------------
-    # Checks individuels
-    # ------------------------------------------------------------------
 
     def _check_bet_size(self, source_amount: float) -> FilterResult:
         if source_amount < self.min_bet:
@@ -157,7 +138,6 @@ class ConvictionFilter:
         return FilterResult(passed=True, reason="ok", score=wallet_score)
 
     def _check_rate_limit(self, market_id: str) -> FilterResult:
-        """Empêche de copier le même marché plus de N fois par heure."""
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=1)
         recent = [t for t in self._market_copies[market_id] if t > cutoff]
@@ -210,10 +190,6 @@ class ConvictionFilter:
 
         return FilterResult(passed=True, reason="ok", score=max(0.1, entry_timing_score))
 
-    # ------------------------------------------------------------------
-    # Évaluation globale
-    # ------------------------------------------------------------------
-
     def evaluate(
         self,
         source_amount: float,
@@ -223,7 +199,7 @@ class ConvictionFilter:
         consecutive_losses: int = 0,
         entry_timing_score: float = 0.5,
     ) -> FilterResult:
-        self._maybe_cleanup()  # FIX #3
+        self._maybe_cleanup()
 
         checks: list[FilterResult] = [
             self._check_losing_streak(consecutive_losses),
@@ -240,9 +216,6 @@ class ConvictionFilter:
                 logger.debug(f"[FILTER] ✗ {check.reason}")
                 return check
 
-        # FIX #5 — Score global : moyenne pondérée correctement normalisée
-        # Les poids sont définis pour 5 checks de base. Si market_id présent,
-        # on ajoute le 6e check avec son propre poids, et on renormalise.
         BASE_WEIGHTS = {
             0: 0.10,  # losing_streak
             1: 0.20,  # entry_timing
@@ -253,7 +226,6 @@ class ConvictionFilter:
         RATE_LIMIT_WEIGHT = 0.10
 
         if market_id:
-            # Renormalise les 5 poids de base pour faire de la place au 6e
             scale = 1.0 - RATE_LIMIT_WEIGHT
             weights = [BASE_WEIGHTS[i] * scale for i in range(5)]
             weights.append(RATE_LIMIT_WEIGHT)
