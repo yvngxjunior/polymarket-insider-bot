@@ -216,12 +216,15 @@ async def main_loop(
             health_monitor.record_activity()
 
             # Phase 1 — Whale scan
+            # FIX: on utilise directement event["title"] (déjà présent dans l'event
+            # et issu du trade brut API) au lieu de refaire un appel get_market_info()
+            # dont le conditionId peut être vide/stale et retourner n'importe quel
+            # marché en cache (ex: "Joe Biden" pour un tout autre event).
             for event in await whale_tracker.scan():
-                mi = await client.get_market_info(event["condition_id"])
                 await notifier.notify_whale_event(
                     wallet=event["wallet"],
                     amount_usdc=event["amount_usdc"],
-                    market_question=mi.get("question", "") if mi else "",
+                    market_question=event["title"],
                     side=event["side"],
                     price=event["price"],
                 )
@@ -360,7 +363,6 @@ async def run() -> None:
     client               = PolymarketDataClient()
     notifier             = TelegramNotifier()
     risk_manager         = RiskManager()
-    # FIX P0: engine reçoit le risk_manager global — plus d'instance isolée interne
     engine               = TradingEngine(risk_manager=risk_manager)
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
@@ -395,7 +397,6 @@ async def run() -> None:
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
-    # ─ Signal handling — Windows-compatible ────────────────────────────────
     stop_event = asyncio.Event()
     loop       = asyncio.get_running_loop()
 
@@ -404,10 +405,8 @@ async def run() -> None:
         loop.call_soon_threadsafe(stop_event.set)
 
     signal.signal(signal.SIGINT,  _on_signal)
-    # SIGTERM n'existe pas sur Windows — on l'enregistre seulement sur Unix
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _on_signal)
-    # ───────────────────────────────────────────────────────────────────────
 
     refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
     await refresher.start()
