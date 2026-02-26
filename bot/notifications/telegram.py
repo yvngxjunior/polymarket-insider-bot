@@ -232,9 +232,10 @@ class TelegramNotifier:
     # Démarrage du bot
     # ------------------------------------------------------------------
     async def notify_startup(self, dry_run: bool) -> None:
+        # FIX P2: version banner v2.4 → v3.1 (sync avec main.py)
         mode = "🟡 DRY RUN" if dry_run else "🟢 LIVE"
         msg = (
-            f"🤖 <b>PolyInsider Bot v2.4 Started</b>\n"
+            f"🤖 <b>PolyInsider Bot v3.1 Started</b>\n"
             f"────────────────────\n"
             f"Mode: <b>{mode}</b>\n"
             f"Scan interval: <b>{settings.scan_interval}s</b>\n"
