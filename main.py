@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.6
+PolyInsider Bot v2.7
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -25,6 +25,17 @@ v2.6 fixes:
   - FIX BUG-9  get_top_traders() retry par page, pas sur la boucle entière
   - FIX M2    convergence confidence: score non divisé par 100 (était déjà dans [0,1])
   - FIX M3    exit_manager filtre CLOSED% pour éviter re-fermetures inutiles
+
+v2.7 fixes:
+  - FIX EXIT-1  exit_manager filtre unifié DRY_RUN+LIVE via ~LIKE 'CLOSED%'
+  - FIX INSIDER-1  _safe_float() + _known_trades dedup + Semaphore(20)
+  - FIX WHALE-1/2/3  deque FIFO + batch DB is_whale + _safe_float()
+  - FIX REFRESHER-1  _known_wallets chargé depuis DB au __init__ (anti-flood restart)
+  - FIX REFRESHER-2  discovery immédiat si DB vide au démarrage
+  - FIX PM-1  position_manager: rechargement DB au démarrage + fallback is_open()
+  - FIX CONV-1/2  timestamp ms→s + safe_float sur amount/price
+  - FIX ENGINE-4  appels CLOB sync wrappés dans run_in_executor
+  - FIX MAIN-1  whale scan throttlé à toutes les 4 boucles (~12s)
 """
 import asyncio
 import signal
@@ -205,6 +216,9 @@ async def main_loop(
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
+    # FIX MAIN-1: whale scan throttlé — toutes les 4 boucles (~12s avec scan_interval=3s)
+    # L'API /trades ne se rafraîchit pas toutes les 3s -> polling inutile + logs pollus.
+    WHALE_EVERY  = 4
     ARB_EVERY    = 20
     MARKET_EVERY = settings.market_scan_every_n_loops
     LLM_EVERY    = settings.llm_scan_every_n_loops
@@ -216,15 +230,16 @@ async def main_loop(
             loop_count += 1
             health_monitor.record_activity()
 
-            # Phase 1 — Whale scan
-            for event in await whale_tracker.scan():
-                await notifier.notify_whale_event(
-                    wallet=event["wallet"],
-                    amount_usdc=event["amount_usdc"],
-                    market_question=event["title"],
-                    side=event["side"],
-                    price=event["price"],
-                )
+            # Phase 1 — Whale scan (throttlé: toutes les WHALE_EVERY boucles)
+            if loop_count % WHALE_EVERY == 0:
+                for event in await whale_tracker.scan():
+                    await notifier.notify_whale_event(
+                        wallet=event["wallet"],
+                        amount_usdc=event["amount_usdc"],
+                        market_question=event["title"],
+                        side=event["side"],
+                        price=event["price"],
+                    )
 
             # Phase 2+3 — Insider copy trading + convergence par trade
             with get_db() as db:
@@ -339,7 +354,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.6")
+    logger.info("  PolyInsider Bot v2.7")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
