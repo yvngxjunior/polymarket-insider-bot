@@ -117,7 +117,7 @@ async def process_new_trade(
         except Exception as e:
             logger.debug(f"[CONV] process_trade error: {e}")
 
-    # Étape 1 — Filtre de conviction (losing streak + timing + bet + prix + wallet)
+    # Étape 1 — Filtre de conviction
     f = conv_filter.evaluate(
         source_amount=amount,
         price=price,
@@ -139,12 +139,9 @@ async def process_new_trade(
         return
 
     # Étape 3 — Position déjà ouverte ?
-    try:
-        if await position_manager.has_open_position(token_id=token_id, side=side):
-            logger.debug(f"[POS] Already open: {token_id[:8]}")
-            return
-    except Exception:
-        pass
+    if position_manager._positions.get(token_id):
+        logger.debug(f"[POS] Already open: {token_id[:8]}")
+        return
 
     # Étape 4 — Infos du marché
     market_info = await client.get_market_info(condition_id) if condition_id else None
@@ -162,11 +159,18 @@ async def process_new_trade(
     )
 
     if copied_trade:
-        health_monitor.record_trade()   # réinitialise le timer de silence
+        health_monitor.record_trade()
         try:
-            await position_manager.register(copied_trade)
-        except Exception:
-            pass
+            position_manager.register(
+                trade_id=copied_trade.id or 0,
+                token_id=copied_trade.token_id,
+                entry_price=copied_trade.price,
+                amount_usdc=copied_trade.amount_usdc,
+                side=copied_trade.side,
+                market_question=copied_trade.market_question or "",
+            )
+        except Exception as e:
+            logger.debug(f"[POS] register error: {e}")
         try:
             await performance_tracker.record_trade(copied_trade)
         except Exception:
@@ -203,7 +207,7 @@ async def main_loop(
     while True:
         try:
             loop_count += 1
-            health_monitor.record_activity()   # ← ping le monitor à chaque cycle
+            health_monitor.record_activity()
 
             # Phase 1 — Whale scan
             for event in await whale_tracker.scan():
@@ -216,7 +220,7 @@ async def main_loop(
                     price=event["price"],
                 )
 
-            # Phase 2+3 — Insider copy trading + détection de convergence par trade
+            # Phase 2+3 — Insider copy trading + convergence par trade
             with get_db() as db:
                 wallets = (
                     db.query(TrackedWallet)
@@ -357,10 +361,15 @@ async def run() -> None:
     arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner       = MarketScanner(max_concurrent=8)
     llm_agent            = LLMAgent()
-    position_manager     = PositionManager()
     performance_tracker  = PerformanceTracker()
     conv_filter          = ConvictionFilter()
     sizer                = PositionSizer()
+    # PositionManager requires client, risk_manager, notifier
+    position_manager     = PositionManager(
+        client=client,
+        risk_manager=risk_manager,
+        notifier=notifier,
+    )
     exit_manager         = ExitManager(
         risk_manager=risk_manager,
         notifier=notifier,
