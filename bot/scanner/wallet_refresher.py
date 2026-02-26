@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 
+from bot.database import get_db, TrackedWallet
 from bot.scanner.insider import InsiderScanner
 from bot.notifications.telegram import TelegramNotifier
 from bot.utils.logger import logger
@@ -156,7 +157,6 @@ class WalletRefresher:
         Ce champ est lu par process_new_trade() dans main.py pour la protection
         contre les séries de pertes (losing streak).
         """
-        from bot.database import get_db, TrackedWallet
         try:
             with get_db() as db:
                 for analysis in analyses:
