@@ -35,6 +35,7 @@ class TradingEngine:
     FIX ENGINE-5: lecture du order book réel avant chaque BUY + slicing.
     FIX ENGINE-6: slash manquant dans l'URL /book (404 silencieux).
     FIX ENGINE-7: close_position passait shares au lieu d'USDC au CLOB.
+    FIX ENGINE-8: guard source_amount <= 0 avant tout ordre.
     """
 
     def __init__(self, risk_manager: RiskManager):
@@ -82,12 +83,7 @@ class TradingEngine:
         """
         Récupère le meilleur ask disponible sur le CLOB pour token_id.
         Retourne (price, size_usd) ou None si indisponible.
-
-        FIX ENGINE-6: corrige l'URL — slash manquant entre host et 'book'
-        causait une concaténation invalide type 'https://clob.polymarket.combook?...'
-        → 404 silencieux, best toujours None, slicing jamais exécuté.
         """
-        # FIX ENGINE-6: "/book" (avec slash) au lieu de "book"
         url = f"{settings.polymarket_host}/book?token_id={token_id}"
         try:
             async with aiohttp.ClientSession(
@@ -106,7 +102,6 @@ class TradingEngine:
             if not asks:
                 return None
 
-            # Meilleur ask = prix le plus bas
             best = min(asks, key=lambda x: float(x.get("price", 999)))
             price = float(best["price"])
             size_tokens = float(best["size"])
@@ -136,7 +131,6 @@ class TradingEngine:
             if remaining < _MIN_ORDER_USD:
                 break
 
-            # Lecture du book à chaque tranche (le book évolue)
             best = await self._fetch_best_ask(token_id)
             if best is None:
                 logger.warning(
@@ -211,6 +205,14 @@ class TradingEngine:
         market_question: str = "",
         market_id: str = "",
     ) -> Optional[CopiedTrade]:
+        # FIX ENGINE-8: guard montant invalide avant tout traitement
+        if source_amount <= 0:
+            logger.error(
+                f"[ENGINE] copy_trade aborted: source_amount={source_amount} "
+                f"token={token_id[:20]}..."
+            )
+            return None
+
         trade_record = CopiedTrade(
             source_wallet_address=source_wallet, market_id=market_id,
             market_question=market_question, token_id=token_id,
@@ -218,7 +220,6 @@ class TradingEngine:
         )
 
         if settings.dry_run:
-            # FIX ENGINE-5 DRY_RUN: log du meilleur ask pour vérifier la liquidité
             best = await self._fetch_best_ask(token_id)
             ask_info = (
                 f" | best ask: ${best[1]:.2f} @ {best[0]:.4f}"
@@ -237,7 +238,6 @@ class TradingEngine:
 
         try:
             if side.upper() == "BUY":
-                # FIX ENGINE-5: lecture order book + slicing pour les BUY
                 success = await self._execute_buy_sliced(
                     token_id=token_id,
                     total_usd=source_amount,
@@ -253,7 +253,6 @@ class TradingEngine:
                     self._save_trade(trade_record)
                     return None
             else:
-                # SELL: logique directe (pas de slicing nécessaire côté bid)
                 order_args = MarketOrderArgs(
                     token_id=token_id, amount=source_amount, side=SELL,
                 )
@@ -276,7 +275,6 @@ class TradingEngine:
             trade_record.skip_reason = str(e)[:200]
             logger.error(f"Trade FAILED: {e} | token={token_id[:20]}...")
             self._save_trade(trade_record)
-            # FIX ENGINE-1: retour None -> main.py ne fait pas register_position()
             return None
 
         self._save_trade(trade_record)
@@ -291,14 +289,9 @@ class TradingEngine:
     ) -> bool:
         """
         Ferme une position en envoyant un ordre SELL au CLOB.
-
         FIX ENGINE-2: guard entry_price <= 0.
-        FIX ENGINE-7: on passe amount_usdc directement au CLOB (market order
-          en USDC), et non amount_usdc / entry_price (qui donnait des shares).
-          Le CLOB Polymarket interprète 'amount' comme USDC pour les market
-          orders, exactement comme pour les BUY.
+        FIX ENGINE-7: amount_usdc directement (pas de division par entry_price).
         """
-        # FIX ENGINE-2: guard entry_price <= 0
         if entry_price <= 0:
             logger.error(
                 f"[ENGINE] close_position aborted: invalid entry_price={entry_price} "
@@ -322,7 +315,6 @@ class TradingEngine:
             return True
 
         try:
-            # FIX ENGINE-7: amount_usdc directement (pas de division par entry_price)
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount_usdc,

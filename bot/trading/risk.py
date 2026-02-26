@@ -76,7 +76,6 @@ class RiskManager:
       CONVERGENCE_BOOST       Multiplicateur convergence (défaut: 1.5)
     """
 
-    # ── Properties alias → settings.* (zéro hardcode, rétro-compatibilité) ──
     @property
     def MAX_POSITIONS(self) -> int:
         return settings.max_positions
@@ -106,6 +105,11 @@ class RiskManager:
             peak_capital=initial_capital,
         )
         self._load_from_db()
+
+    def open_positions_count(self) -> int:
+        """API publique — nombre de positions ouvertes en mémoire.
+        Préférer cette méthode à l'accès direct à _open_positions."""
+        return len(self._open_positions)
 
     def _load_from_db(self) -> None:
         try:
@@ -137,6 +141,7 @@ class RiskManager:
                 self._open_positions = {
                     t.strip() for t in csv.split(",") if t.strip()
                 }
+                self.portfolio.open_positions_count = len(self._open_positions)
                 logger.info(
                     f"[RISK] Loaded from DB — capital=${self.portfolio.total_capital:.2f} "
                     f"peak=${self.portfolio.peak_capital:.2f} "
@@ -146,11 +151,15 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """UPSERT portable SQLite + PostgreSQL."""
+        """UPSERT portable SQLite + PostgreSQL.
+        FIX RISK-8: updated_at passé comme objet datetime (pas ISO string)
+        pour compatibilité PostgreSQL native.
+        """
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)
-            now = datetime.utcnow().isoformat()
+            # FIX RISK-8: datetime object, pas isoformat() string
+            now = datetime.utcnow()
             params = {
                 "cap":  self.portfolio.total_capital,
                 "peak": self.portfolio.peak_capital,
@@ -234,12 +243,13 @@ class RiskManager:
         )
 
     def _kelly_sizing(self, win_rate: float, price: float) -> float:
+        """Quarter-Kelly avec clamp win_rate [0,1] et protection division par zéro."""
         win_rate = max(0.0, min(1.0, win_rate))
         if price <= 0 or price >= 1:
             return 0.01
         b = (1 - price) / price
         full_kelly = (win_rate * (b + 1) - 1) / b
-        quarter_kelly = max(0, full_kelly * settings.kelly_fraction)
+        quarter_kelly = max(0.0, full_kelly * settings.kelly_fraction)
         return min(quarter_kelly, settings.max_position_pct)
 
     def register_position(self, token_id: str) -> None:
@@ -253,7 +263,7 @@ class RiskManager:
         logger.info(
             f"[RISK] Partial PnL applied: ${pnl:+.2f} | "
             f"Capital: ${self.portfolio.total_capital:.2f} | "
-            f"Open: {len(self._open_positions)}"
+            f"Open: {self.open_positions_count()}"
         )
 
     def release_position(self, token_id: str, pnl: float = 0.0) -> None:

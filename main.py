@@ -25,6 +25,12 @@ v2.9 fixes:
   - FIX RISK-6     INSERT portfolio_snapshot jamais commité
   - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
   - FIX FILTER-1   rate-limit query status case-sensitive
+
+v3.0 fixes (audit lot 1):
+  - FIX MAIN-4     performance_tracker.record_trade bare except → logger.warning
+  - FIX MAIN-5     convergence.process_trade logger.debug → logger.warning
+  - FIX MAIN-6     _open_positions accès privé → open_positions_count() public
+  - FIX MAIN-7     aiohttp.ClientSession LLM recréé chaque cycle → session unique
 """
 import asyncio
 import signal
@@ -124,7 +130,8 @@ async def process_new_trade(
                     "avg_price":    conv_signal.avg_price,
                 })
         except Exception as e:
-            logger.debug(f"[CONV] process_trade error: {e}")
+            # FIX MAIN-5: warning au lieu de debug — composant critique
+            logger.warning(f"[CONV] process_trade error: {e}")
 
     f = conv_filter.evaluate(
         source_amount=amount,
@@ -181,10 +188,11 @@ async def process_new_trade(
             )
         except Exception as e:
             logger.debug(f"[POS] register error: {e}")
+        # FIX MAIN-4: bare except → logger.warning pour tracer les échecs
         try:
             await performance_tracker.record_trade(copied_trade)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[PERF] record_trade failed: {e}")
         await notifier.notify_trade(copied_trade, market_question=question)
 
 
@@ -205,6 +213,8 @@ async def main_loop(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
     health_monitor: HealthMonitor,
+    # FIX MAIN-7: session aiohttp LLM créée une seule fois, injectée ici
+    llm_session: aiohttp.ClientSession,
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
@@ -308,33 +318,32 @@ async def main_loop(
                     )
 
             # Phase 6 — LLM analysis
+            # FIX MAIN-7: réutilise llm_session (créée une fois dans run())
             if loop_count % LLM_EVERY == 0 and llm_agent.is_enabled():
                 try:
-                    async with aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as session:
-                        async with session.get(
-                            f"{settings.polymarket_gamma_host}/markets",
-                            params={
-                                "active": "true", "closed": "false",
-                                "limit": settings.llm_top_markets * 4,
-                            },
-                        ) as resp:
-                            if resp.status == 200:
-                                hot = await resp.json()
-                                if isinstance(hot, list):
-                                    for sig in await llm_agent.batch_analyze(
-                                        hot, top_n=settings.llm_top_markets
-                                    ):
-                                        logger.info(
-                                            f"[LLM] {sig.recommendation} '{sig.question[:45]}' "
-                                            f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
-                                        )
-                                        await notifier.notify_llm_signal(sig)
+                    async with llm_session.get(
+                        f"{settings.polymarket_gamma_host}/markets",
+                        params={
+                            "active": "true", "closed": "false",
+                            "limit": settings.llm_top_markets * 4,
+                        },
+                    ) as resp:
+                        if resp.status == 200:
+                            hot = await resp.json()
+                            if isinstance(hot, list):
+                                for sig in await llm_agent.batch_analyze(
+                                    hot, top_n=settings.llm_top_markets
+                                ):
+                                    logger.info(
+                                        f"[LLM] {sig.recommendation} '{sig.question[:45]}' "
+                                        f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
+                                    )
+                                    await notifier.notify_llm_signal(sig)
                 except Exception as e:
                     logger.debug(f"[LLM] Scan cycle error: {e}")
 
             # Phase 7 — Performance report
+            # FIX MAIN-6: open_positions_count() public au lieu de _open_positions privé
             if loop_count % PERF_EVERY == 0:
                 try:
                     stats = await performance_tracker.get_summary()
@@ -342,10 +351,10 @@ async def main_loop(
                         f"[PERF] WR={stats.get('win_rate', 0):.1%} | "
                         f"PnL={stats.get('total_pnl_usdc', 0):+.2f} USDC | "
                         f"Trades={stats.get('total_trades', 0)} | "
-                        f"Open={len(risk_manager._open_positions)}"
+                        f"Open={risk_manager.open_positions_count()}"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[PERF] summary error: {e}")
 
         except asyncio.CancelledError:
             raise
@@ -451,6 +460,9 @@ async def run() -> None:
     except Exception as e:
         logger.warning(f"[COMMANDS] Could not start polling (token invalid?): {e}")
 
+    # FIX MAIN-7: session aiohttp LLM créée une fois ici, partagée sur toute la durée de vie
+    llm_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+
     main_task = asyncio.create_task(
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
@@ -461,6 +473,7 @@ async def run() -> None:
             performance_tracker=performance_tracker,
             conv_filter=conv_filter, sizer=sizer,
             health_monitor=health_monitor,
+            llm_session=llm_session,
         )
     )
 
@@ -482,6 +495,8 @@ async def run() -> None:
         llm_agent.close(),
         return_exceptions=True,
     )
+    if not llm_session.closed:
+        await llm_session.close()
     await notifier.send("🛑 <b>PolyInsider Bot stopped.</b>")
     logger.info("Cleanup done. Goodbye!")
 
