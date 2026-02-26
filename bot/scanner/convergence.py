@@ -7,15 +7,15 @@ from bot.trading.polymarket import PolymarketDataClient
 from bot.utils.logger import logger
 
 # Nettoyage du dict _recent_trades toutes les N updates
-# pour éviter le leak mémoire sur des milliers de marchés distincts (BUG-3).
+# pour eviter le leak memoire sur des milliers de marches distincts (BUG-3).
 _CLEANUP_EVERY = 500
 
 
 @dataclass
 class ConvergenceSignal:
     """
-    Signal fort: plusieurs wallets insiders ont misé sur le même outcome
-    dans une fenêtre de temps courte.
+    Signal fort: plusieurs wallets insiders ont mise sur le meme outcome
+    dans une fenetre de temps courte.
     Plus il y en a, plus le signal est fort.
     """
     token_id: str
@@ -30,21 +30,25 @@ class ConvergenceSignal:
     @property
     def strength(self) -> str:
         if self.wallet_count >= 5:
-            return "🔥 ULTRA (5+ insiders)"
+            return "ULTRA (5+ insiders)"
         elif self.wallet_count >= 3:
-            return "⚡ STRONG (3-4 insiders)"
-        return "🔵 MODERATE (2 insiders)"
+            return "STRONG (3-4 insiders)"
+        return "MODERATE (2 insiders)"
 
 
 class ConvergenceDetector:
     """
-    Detecte quand plusieurs wallets insiders s'alignent sur le même outcome.
-    Fenêtre de détection: 10 minutes. Seuil minimum: 2 wallets.
+    Detecte quand plusieurs wallets insiders s'alignent sur le meme outcome.
+    Fenetre de detection: 10 minutes. Seuil minimum: 2 wallets.
 
-    FIX BUG-3: nettoyage périodique de _recent_trades pour éviter le leak
-    mémoire progressif sur des runs longue durée (milliers de marchés distincts).
-    FIX M2: confidence calculée correctement — les scores wallet sont déjà
+    FIX BUG-3: nettoyage periodique de _recent_trades pour eviter le leak
+    memoire progressif sur des runs longue duree (milliers de marches distincts).
+    FIX M2: confidence calculee correctement -- les scores wallet sont deja
     entre 0 et 1, donc pas de division par 100.
+    FIX CONV-1: normalisation timestamp ms->s en tete de process_trade().
+      Si timestamp > 1e12 (millisecondes), on divise par 1000 avant usage.
+      Evite une fenetre de detection silencieusement cassee si l'API retourne ms.
+    FIX CONV-2: guard float(amount or 0) et float(price or 0) sur les params.
     """
 
     WINDOW_SECONDS = 600
@@ -65,7 +69,17 @@ class ConvergenceDetector:
         price: float,
         timestamp: float,
     ) -> Optional[ConvergenceSignal]:
-        now = timestamp
+        # FIX CONV-1: normalisation ms -> s
+        # Certains endpoints Polymarket retournent le timestamp en millisecondes.
+        # On normalise systematiquement pour garantir une fenetre de 600s correcte.
+        if timestamp > 1e12:
+            timestamp /= 1000
+
+        # FIX CONV-2: protection contre None sur amount/price
+        amount = float(amount or 0)
+        price  = float(price or 0)
+
+        now    = timestamp
         cutoff = now - self.WINDOW_SECONDS
 
         self._recent_trades[token_id].append({
@@ -76,7 +90,7 @@ class ConvergenceDetector:
             t for t in self._recent_trades[token_id] if t["ts"] > cutoff
         ]
 
-        # FIX BUG-3: nettoyage périodique des clés expirées
+        # FIX BUG-3: nettoyage periodique des cles expirees
         self._update_count += 1
         if self._update_count % _CLEANUP_EVERY == 0:
             self._cleanup_stale(cutoff)
@@ -102,14 +116,14 @@ class ConvergenceDetector:
             confidence=confidence,
         )
         logger.info(
-            f"🔥 CONVERGENCE SIGNAL: {signal.strength} — "
+            f"[CONV] {signal.strength} -- "
             f"{len(unique_wallets)} wallets on {token_id[:16]}... "
             f"${signal.total_amount_usdc:,.0f} USDC | confidence={confidence:.0%}"
         )
         return signal
 
     def _cleanup_stale(self, cutoff: float) -> None:
-        """Supprime les clés dont tous les trades ont expiré la fenêtre de 10min."""
+        """Supprime les cles dont tous les trades ont expire la fenetre de 10min."""
         stale_keys = [
             k for k, trades in self._recent_trades.items()
             if not trades or all(t["ts"] <= cutoff for t in trades)
