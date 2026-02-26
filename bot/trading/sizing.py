@@ -110,15 +110,13 @@ class PositionSizer:
         raw_tiered = getattr(settings, "tiered_multipliers", "") or ""
         self._tiered_bands: list[TieredBand] = _parse_tiered_multipliers(raw_tiered)
         if self._tiered_bands:
-            logger.info(
-                f"[SIZER] Tiered multipliers active: "
-                + ", ".join(
-                    f"${b.min_usd:.0f}-"
-                    + ("∞" if b.max_usd == float("inf") else f"${b.max_usd:.0f}")
-                    + f":×{b.multiplier}"
-                    for b in self._tiered_bands
-                )
+            bands_str = ", ".join(
+                f"${b.min_usd:.0f}-"
+                + ("∞" if b.max_usd == float("inf") else f"${b.max_usd:.0f}")
+                + f":×{b.multiplier}"
+                for b in self._tiered_bands
             )
+            logger.info(f"[SIZER] Tiered multipliers active: {bands_str}")
         else:
             logger.debug("[SIZER] No TIERED_MULTIPLIERS configured — pure Kelly sizing")
 
