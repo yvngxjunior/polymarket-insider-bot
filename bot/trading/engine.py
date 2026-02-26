@@ -28,17 +28,13 @@ class TradingEngine:
     DRY_RUN=True  -> simulation uniquement (log + DB)
     DRY_RUN=False -> ordres signes et envoyes sur Polygon
 
-    FIX P0:       RiskManager injecte depuis main.py (instance partagee).
     FIX ENGINE-1: copy_trade() retourne None en cas d'exception CLOB
-                  -> main.py ne fait plus register_position() sur FAILED.
     FIX ENGINE-2: close_position() guard entry_price <= 0 avant division.
     FIX ENGINE-3: tx_hash manquant -> 'MISSING_TX' + warning.
-    FIX ENGINE-4: create_market_order() + post_order() sont synchrones
-                  (py-clob-client). Executes dans run_in_executor pour
-                  ne pas bloquer l'event loop asyncio pendant la requete HTTP.
-    FIX ENGINE-5: lecture du order book réel avant chaque BUY.
-                  Découpage en tranches si meilleur ask < montant demandé.
-                  Évite les fills partiels silencieux et les ordres rejetés.
+    FIX ENGINE-4: appels synchrones CLOB dans run_in_executor.
+    FIX ENGINE-5: lecture du order book réel avant chaque BUY + slicing.
+    FIX ENGINE-6: slash manquant dans l'URL /book (404 silencieux).
+    FIX ENGINE-7: close_position passait shares au lieu d'USDC au CLOB.
     """
 
     def __init__(self, risk_manager: RiskManager):
@@ -64,8 +60,7 @@ class TradingEngine:
         self, order_args: MarketOrderArgs
     ) -> dict:
         """
-        FIX ENGINE-4: wrappe les deux appels synchrones CLOB dans run_in_executor
-        pour eviter de bloquer l'event loop asyncio.
+        FIX ENGINE-4: wrappe les appels synchrones CLOB dans run_in_executor.
         """
         loop = asyncio.get_event_loop()
         client = self._get_client()
@@ -78,7 +73,7 @@ class TradingEngine:
         return response
 
     # ------------------------------------------------------------------
-    # FIX ENGINE-5: lecture du order book réel
+    # FIX ENGINE-5 + ENGINE-6: order book réel
     # ------------------------------------------------------------------
 
     async def _fetch_best_ask(
@@ -87,14 +82,23 @@ class TradingEngine:
         """
         Récupère le meilleur ask disponible sur le CLOB pour token_id.
         Retourne (price, size_usd) ou None si indisponible.
+
+        FIX ENGINE-6: corrige l'URL — slash manquant entre host et 'book'
+        causait une concaténation invalide type 'https://clob.polymarket.combook?...'
+        → 404 silencieux, best toujours None, slicing jamais exécuté.
         """
-        url = f"{settings.polymarket_host}book?token_id={token_id}"
+        # FIX ENGINE-6: "/book" (avec slash) au lieu de "book"
+        url = f"{settings.polymarket_host}/book?token_id={token_id}"
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as session:
                 async with session.get(url) as resp:
                     if resp.status != 200:
+                        logger.debug(
+                            f"[ENGINE] _fetch_best_ask HTTP {resp.status} "
+                            f"for {token_id[:16]}..."
+                        )
                         return None
                     data = await resp.json()
 
@@ -146,7 +150,8 @@ class TradingEngine:
 
             if slice_usd < _MIN_ORDER_USD:
                 logger.debug(
-                    f"[ENGINE] Best ask size ${ask_size_usd:.2f} < min ${_MIN_ORDER_USD} — stopping slices"
+                    f"[ENGINE] Best ask size ${ask_size_usd:.2f} < min ${_MIN_ORDER_USD} "
+                    f"— stopping slices"
                 )
                 break
 
@@ -242,7 +247,8 @@ class TradingEngine:
                     trade_record.status = TradeStatus.FAILED
                     trade_record.skip_reason = "No asks / all slices failed"
                     logger.error(
-                        f"Trade FAILED: no fills on {market_question[:40] or token_id[:20]}..."
+                        f"Trade FAILED: no fills on "
+                        f"{market_question[:40] or token_id[:20]}..."
                     )
                     self._save_trade(trade_record)
                     return None
@@ -283,7 +289,16 @@ class TradingEngine:
         amount_usdc: float,
         market_question: str = "",
     ) -> bool:
-        # FIX ENGINE-2: guard entry_price <= 0 avant division
+        """
+        Ferme une position en envoyant un ordre SELL au CLOB.
+
+        FIX ENGINE-2: guard entry_price <= 0.
+        FIX ENGINE-7: on passe amount_usdc directement au CLOB (market order
+          en USDC), et non amount_usdc / entry_price (qui donnait des shares).
+          Le CLOB Polymarket interprète 'amount' comme USDC pour les market
+          orders, exactement comme pour les BUY.
+        """
+        # FIX ENGINE-2: guard entry_price <= 0
         if entry_price <= 0:
             logger.error(
                 f"[ENGINE] close_position aborted: invalid entry_price={entry_price} "
@@ -291,11 +306,10 @@ class TradingEngine:
             )
             return False
 
-        shares_to_sell = round(amount_usdc / entry_price, 4)
-        if shares_to_sell <= 0:
+        if amount_usdc <= 0:
             logger.error(
-                f"[ENGINE] close_position aborted: computed 0 shares "
-                f"(amount_usdc={amount_usdc} / entry_price={entry_price})"
+                f"[ENGINE] close_position aborted: amount_usdc={amount_usdc} "
+                f"token={token_id[:20]}..."
             )
             return False
 
@@ -303,20 +317,25 @@ class TradingEngine:
 
         if settings.dry_run:
             logger.info(
-                f"[DRY RUN] Would SELL {shares_to_sell} shares "
-                f"(~${amount_usdc:.2f}) on {label}..."
+                f"[DRY RUN] Would SELL ${amount_usdc:.2f} USDC on {label}..."
             )
             return True
 
         try:
+            # FIX ENGINE-7: amount_usdc directement (pas de division par entry_price)
             order_args = MarketOrderArgs(
-                token_id=token_id, amount=shares_to_sell, side=SELL,
+                token_id=token_id,
+                amount=amount_usdc,
+                side=SELL,
             )
-            # FIX ENGINE-4: appel non-bloquant via run_in_executor
             response = await self._clob_submit(order_args)
             tx_hash = response.get("orderID") or "MISSING_TX"
+            if tx_hash == "MISSING_TX":
+                logger.warning(
+                    f"[ENGINE] Missing orderID on close — token={token_id[:20]}"
+                )
             logger.success(
-                f"Position CLOSED: SELL {shares_to_sell} shares "
+                f"Position CLOSED: SELL ${amount_usdc:.2f} USDC "
                 f"on {label}... | TX: {(tx_hash or '')[:12]}..."
             )
             return True

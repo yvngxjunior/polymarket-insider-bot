@@ -13,14 +13,13 @@ Logique de vente partielle:
   - Le reste court jusqu'au TP2 (+40%), SL, résolution ou durée max
   - En DRY RUN : simule tout, log + Telegram, zéro ordre réel
 
-FIX BUG-2 — _partial_sold persisté en DB (colonne tp1_remaining sur CopiedTrade).
-  Au démarrage, _load_partial_sold() recharge l'état → survit aux redémarrages.
-FIX BUG-3 (M3) — filtre SQL exclut désormais les positions déjà CLOSED pour éviter
-  les tentatives de re-fermeture inutiles à chaque cycle.
-FIX EXIT-1 — filtre _check_positions() unifié DRY_RUN + LIVE :
-  ~skip_reason.like('CLOSED%') couvre DRY_RUN, TP1_REMAINING et tx_hash réels.
-  Avant: filtre DRY_RUN séparé perdait les trades après TP1 partiel
-  (skip_reason réécrit en 'TP1_REMAINING:XX' → plus dans IN ['DRY_RUN']).
+FIX BUG-2  — _partial_sold persisté en DB (colonne tp1_remaining sur CopiedTrade).
+FIX BUG-3  — filtre SQL exclut les positions déjà CLOSED.
+FIX EXIT-1 — filtre _check_positions() unifié DRY_RUN + LIVE.
+FIX EXIT-2 — _get_current_price accepte maintenant le side (BUY/SELL)
+               pour éviter le calcul de PnL faux sur les positions SELL.
+FIX EXIT-3 — guard trade.id is None dans _check_positions
+               pour éviter KeyError sur _partial_sold[None].
 """
 import asyncio
 from datetime import datetime
@@ -51,13 +50,13 @@ class ExitManager:
     PositionManager ne doit PAS appeler release_position() (cf. BUG-1).
     """
 
-    TAKE_PROFIT1_PCT = 0.20    # +20% → TP1 partiel (50% vendus)
-    TAKE_PROFIT2_PCT = 0.40    # +40% → TP2 final   (100% du restant vendus)
-    STOP_LOSS_PCT    = 0.30    # -30% → Stop Loss total
-    MAX_HOLD_HOURS   = 72      # 72h max de détention
-    RESOLVING_THRESH = 0.95    # Prix > 95% ou < 5% → résolution imminente
-    CHECK_INTERVAL   = 60      # Vérifie toutes les 60s
-    PARTIAL_SELL_PCT = 0.50    # Fraction vendue au TP1
+    TAKE_PROFIT1_PCT = 0.20
+    TAKE_PROFIT2_PCT = 0.40
+    STOP_LOSS_PCT    = 0.30
+    MAX_HOLD_HOURS   = 72
+    RESOLVING_THRESH = 0.95
+    CHECK_INTERVAL   = 60
+    PARTIAL_SELL_PCT = 0.50
 
     def __init__(
         self,
@@ -80,10 +79,6 @@ class ExitManager:
     # ------------------------------------------------------------------
 
     def _load_partial_sold(self) -> None:
-        """
-        Recharge depuis la DB les positions dont le TP1 a déjà été exécuté.
-        Utilise la colonne skip_reason pour détecter 'TP1_REMAINING:{amount}'.
-        """
         try:
             from bot.database import engine as db_engine
             with db_engine.connect() as conn:
@@ -109,7 +104,6 @@ class ExitManager:
             logger.warning(f"[EXIT] Could not load partial sold state: {e}")
 
     def _persist_partial(self, trade_id: int, remaining: float) -> None:
-        """Persiste l'état TP1 dans skip_reason pour survie aux redémarrages."""
         try:
             with get_db() as db:
                 t = db.query(CopiedTrade).filter(CopiedTrade.id == trade_id).first()
@@ -133,11 +127,20 @@ class ExitManager:
     # Prix actuel d'un token
     # ------------------------------------------------------------------
 
-    async def _get_current_price(self, token_id: str) -> Optional[float]:
+    async def _get_current_price(
+        self, token_id: str, side: str = "BUY"
+    ) -> Optional[float]:
+        """
+        Récupère le prix actuel du token pour le side donné.
+
+        FIX EXIT-2: le side était hardcodé à BUY, ce qui donnait un prix
+        incorrect (et donc un PnL/TP/SL faux) pour les positions SELL.
+        On passe maintenant trade.side depuis _check_positions().
+        """
         try:
             async with self._get_session().get(
                 f"{settings.polymarket_host}/price",
-                params={"token_id": token_id, "side": "BUY"},
+                params={"token_id": token_id, "side": side.upper()},
             ) as resp:
                 if resp.status == 200:
                     return float((await resp.json()).get("price", 0))
@@ -160,10 +163,8 @@ class ExitManager:
     ) -> tuple[str, str, float]:
         """
         Détermine quelle action prendre.
-
-        Returns:
-            (action, reason, sell_amount_usdc)
-            action: "PARTIAL" | "FULL" | "NONE"
+        Returns: (action, reason, sell_amount_usdc)
+          action: "PARTIAL" | "FULL" | "NONE"
         """
         if side.upper() == "BUY":
             pnl_pct = (current_price - entry_price) / entry_price
@@ -171,30 +172,24 @@ class ExitManager:
             pnl_pct = (entry_price - current_price) / entry_price
 
         already_partial = trade_id in self._partial_sold
-        # Montant restant (après TP1 éventuel)
         remaining = self._partial_sold.get(trade_id, amount_usdc)
 
-        # ── Stop Loss — toujours vend TOUT (même si TP1 déjà exécuté) ──
         if pnl_pct <= -self.STOP_LOSS_PCT:
             return "FULL", f"SL {pnl_pct:.1%}", remaining
 
-        # ── Marché quasi-résolu ──
         if current_price >= self.RESOLVING_THRESH:
             return "FULL", f"Market resolving YES @ {current_price:.2f}", remaining
         if current_price <= (1.0 - self.RESOLVING_THRESH):
             return "FULL", f"Market resolving NO @ {current_price:.2f}", remaining
 
-        # ── Durée max ──
         if executed_at:
             age_h = (datetime.utcnow() - executed_at).total_seconds() / 3600
             if age_h >= self.MAX_HOLD_HOURS:
                 return "FULL", f"Max hold {age_h:.0f}h", remaining
 
-        # ── TP2 (uniquement si TP1 déjà exécuté) ──
         if already_partial and pnl_pct >= self.TAKE_PROFIT2_PCT:
             return "FULL", f"TP2 +{pnl_pct:.1%}", remaining
 
-        # ── TP1 (uniquement si pas encore fait) ──
         if not already_partial and pnl_pct >= self.TAKE_PROFIT1_PCT:
             partial_amount = round(amount_usdc * self.PARTIAL_SELL_PCT, 2)
             return "PARTIAL", f"TP1 +{pnl_pct:.1%} (50% sold)", partial_amount
@@ -212,13 +207,11 @@ class ExitManager:
     # ------------------------------------------------------------------
 
     async def _check_positions(self) -> None:
-        # FIX EXIT-1 — filtre unifié DRY_RUN + LIVE.
-        # Avant: deux branches séparées → les trades DRY_RUN après TP1
-        # (skip_reason réécrit en 'TP1_REMAINING:XX') tombaient hors du
-        # filtre IN ['DRY_RUN'] et n'étaient plus surveillés pour TP2/SL.
-        # Après: ~LIKE 'CLOSED%' couvre tous les cas (DRY_RUN, TP1_REMAINING,
-        # tx_hash réel) sans distinction. La logique DRY_RUN reste dans les
-        # actions (settings.dry_run), pas dans la sélection SQL.
+        """
+        FIX EXIT-1: filtre unifié DRY_RUN + LIVE via ~LIKE 'CLOSED%'.
+        FIX EXIT-3: guard trade.id is None pour éviter KeyError sur _partial_sold.
+        FIX EXIT-2: passe trade.side à _get_current_price().
+        """
         with get_db() as db:
             open_trades = (
                 db.query(CopiedTrade)
@@ -230,7 +223,16 @@ class ExitManager:
             )
 
         for trade in open_trades:
-            current = await self._get_current_price(trade.token_id)
+            # FIX EXIT-3: trade.id peut être None si non encore flushé
+            if trade.id is None:
+                logger.warning(
+                    f"[EXIT] Skipping trade with id=None "
+                    f"(token={trade.token_id[:16] if trade.token_id else '?'})"
+                )
+                continue
+
+            # FIX EXIT-2: passe trade.side pour obtenir le bon prix
+            current = await self._get_current_price(trade.token_id, side=trade.side)
             if current is None:
                 continue
 
@@ -263,7 +265,6 @@ class ExitManager:
                 f"| {reason} | sell=${sell_amount:.2f} | P&L {pnl:+.2f} USDC"
             )
 
-            # ── Exécution ──
             success = await self.engine.close_position(
                 token_id=trade.token_id,
                 entry_price=trade.price,
@@ -275,12 +276,9 @@ class ExitManager:
                 continue
 
             if is_partial:
-                # ── TP1 exécuté : met à jour le montant restant ──
                 remaining = round(trade.amount_usdc - sell_amount, 2)
                 self._partial_sold[trade.id] = remaining
-                # FIX BUG-2: persiste en DB pour survie au redémarrage
                 self._persist_partial(trade.id, remaining)
-
                 self.risk_manager.apply_pnl(pnl=pnl)
 
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
@@ -290,21 +288,17 @@ class ExitManager:
                     f"────────────────────\n"
                     f"📊 <i>{(trade.market_question or trade.token_id[:20])[:60]}</i>\n"
                     f"💰 Sold: <b>${sell_amount:.2f} USDC (50%)</b>\n"
-                    f"{pnl_emoji} P&L partiel: <b>{pnl:+.2f} USDC</b>\n"
+                    f"{pnl_emoji} P&amp;L partiel: <b>{pnl:+.2f} USDC</b>\n"
                     f"📈 Entry: {trade.price:.3f} → Now: {current:.3f}\n"
                     f"⏳ Remaining: <b>${remaining:.2f} USDC</b> running to TP2 (+40%)\n"
                     f"📝 Trigger: {reason}\n"
                 )
 
             else:
-                # ── Fermeture totale ──
                 self.risk_manager.release_position(trade.token_id, pnl=pnl)
-
-                # was_partial évalué AVANT le .pop()
                 was_partial = trade.id in self._partial_sold
                 self._partial_sold.pop(trade.id, None)
 
-                # Marque la position comme clôturée en DB
                 with get_db() as db:
                     t = db.query(CopiedTrade).filter(CopiedTrade.id == trade.id).first()
                     if t:
@@ -318,7 +312,7 @@ class ExitManager:
                     f"📤 <b>Position {'Closed' if not settings.dry_run else 'Closed (DRY RUN)'}</b>\n"
                     f"────────────────────\n"
                     f"📊 <i>{(trade.market_question or trade.token_id[:20])[:60]}</i>\n"
-                    f"{pnl_emoji} P&L: <b>{pnl:+.2f} USDC</b>\n"
+                    f"{pnl_emoji} P&amp;L: <b>{pnl:+.2f} USDC</b>\n"
                     f"📈 Entry: {trade.price:.3f} → Exit: {current:.3f}\n"
                     f"📝 Trigger: {reason}\n"
                 )

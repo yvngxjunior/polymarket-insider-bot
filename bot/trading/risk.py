@@ -62,16 +62,16 @@ class RiskManager:
     """
     Gestionnaire de risques v2 — Kelly Criterion + limites dynamiques.
 
-    FIX #1 — Capital persisté en DB (PortfolioSnapshot).
-    FIX #2 — open_positions persistées en DB : survit aux redémarrages.
-    À l'init, on recharge l'état depuis la DB au lieu de repartir à $500.
-
-    FIX RISK-1 — _persist() : UPSERT (UPDATE + INSERT si 0 lignes),
-                  updated_at via paramètre Python (compat SQLite + PostgreSQL).
-    FIX RISK-2 — _load_from_db() : robuste sur le type de daily_reset_date
-                  (str en SQLite, objet date en PostgreSQL).
-    FIX RISK-3 — _kelly_sizing() : win_rate clampé dans [0, 1] en entrée
-                  pour éviter un kelly positif avec un win_rate > 1.
+    FIX #1    — Capital persisté en DB (PortfolioSnapshot).
+    FIX #2    — open_positions persistées en DB : survit aux redémarrages.
+    FIX RISK-1 — _persist() : UPSERT portable SQLite + PostgreSQL.
+    FIX RISK-2 — _load_from_db() : robuste sur le type de daily_reset_date.
+    FIX RISK-3 — _kelly_sizing() : win_rate clampé dans [0, 1].
+    FIX RISK-4 — evaluate() : market_volume_usdc=0.0 par défaut (0 = non fourni
+                  = filtre LOW_LIQUIDITY désactivé). Quand le volume réel est
+                  passé (> 0), le filtre s'applique normalement.
+                  Avant: valeur par défaut 10_000 rendait le filtre toujours vrai
+                  car process_new_trade() ne passait jamais de volume réel.
     """
 
     MAX_POSITIONS = 10
@@ -86,7 +86,7 @@ class RiskManager:
         self._load_from_db()
 
     # ------------------------------------------------------------------
-    # FIX #1 + #2 — Persistance DB
+    # Persistance DB
     # ------------------------------------------------------------------
 
     def _load_from_db(self) -> None:
@@ -105,7 +105,6 @@ class RiskManager:
                 self.portfolio.total_capital = float(row[0] or 500.0)
                 self.portfolio.peak_capital  = float(row[1] or row[0] or 500.0)
                 self.portfolio.daily_pnl     = float(row[2] or 0.0)
-                # FIX RISK-2 : daily_reset_date peut être str (SQLite) ou date (PostgreSQL)
                 try:
                     stored_date = row[3]
                     if stored_date:
@@ -130,12 +129,7 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """
-        FIX RISK-1 : UPSERT portable SQLite + PostgreSQL.
-        - Tente un UPDATE WHERE id=1
-        - Si 0 lignes affectées (à la toute première run), fait un INSERT
-        - updated_at passé en paramètre Python (plus de datetime('now') SQLite-only)
-        """
+        """UPSERT portable SQLite + PostgreSQL."""
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)
@@ -159,8 +153,6 @@ class RiskManager:
                     params,
                 )
                 if result.rowcount == 0:
-                    # Ligne absente (ne devrait pas arriver après init_db, mais
-                    # on s'en protège pour une sécurité maximale)
                     conn.execute(
                         text(
                             "INSERT INTO portfolio_snapshot "
@@ -189,15 +181,23 @@ class RiskManager:
         source_wallet_balance: float = 1000.0,
         wallet_win_rate: float = 0.70,
         is_convergence_signal: bool = False,
-        market_volume_usdc: float = 10_000.0,
+        market_volume_usdc: float = 0.0,
     ) -> TradeDecision:
+        """
+        FIX RISK-4: market_volume_usdc=0.0 par défaut.
+          0.0 signifie "volume non fourni" → filtre LOW_LIQUIDITY désactivé.
+          Si une valeur > 0 est passée ET < 1_000, le filtre s'applique.
+          Avant: 10_000 par défaut → filtre toujours passé → filtre mort.
+        """
         self.portfolio.reset_daily_if_needed()
 
         if price > settings.max_price:
             return TradeDecision(False, 0, RejectReason.PRICE_TOO_HIGH.value)
         if price < settings.min_price:
             return TradeDecision(False, 0, RejectReason.PRICE_TOO_LOW.value)
-        if market_volume_usdc < 1_000:
+
+        # FIX RISK-4: filtre LOW_LIQUIDITY uniquement si volume fourni (> 0)
+        if market_volume_usdc > 0 and market_volume_usdc < 1_000:
             return TradeDecision(False, 0, RejectReason.LOW_LIQUIDITY.value)
 
         daily_loss_limit = -self.portfolio.total_capital * self.DAILY_LOSS_LIMIT_PCT
@@ -221,10 +221,14 @@ class RiskManager:
         if final_amount < 1.0:
             return TradeDecision(False, 0, RejectReason.AMOUNT_TOO_SMALL.value)
 
-        return TradeDecision(approved=True, amount_usdc=final_amount, kelly_fraction=kelly_fraction)
+        return TradeDecision(
+            approved=True,
+            amount_usdc=final_amount,
+            kelly_fraction=kelly_fraction,
+        )
 
     def _kelly_sizing(self, win_rate: float, price: float) -> float:
-        # FIX RISK-3 : clamp win_rate dans [0, 1] pour éviter kelly > 1 sur whitelist
+        # FIX RISK-3: clamp win_rate dans [0, 1]
         win_rate = max(0.0, min(1.0, win_rate))
         if price <= 0 or price >= 1:
             return 0.01
