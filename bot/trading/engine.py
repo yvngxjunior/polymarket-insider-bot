@@ -37,6 +37,7 @@ class TradingEngine:
     FIX ENGINE-7: close_position passait shares au lieu d'USDC au CLOB.
     FIX ENGINE-8: guard source_amount <= 0 avant tout ordre.
     FIX ENGINE-9: _http_session partagée (plus de new ClientSession() à chaque appel).
+    FIX P2: _fetch_best_ask() timeout 5s pour prévenir les hangs ExitManager.
     """
 
     def __init__(self, risk_manager: RiskManager):
@@ -91,7 +92,7 @@ class TradingEngine:
         return response
 
     # ------------------------------------------------------------------
-    # FIX ENGINE-5 + ENGINE-6 + ENGINE-9: order book réel, session partagée
+    # FIX ENGINE-5 + ENGINE-6 + ENGINE-9 + P2: order book réel, session partagée, timeout 5s
     # ------------------------------------------------------------------
 
     async def _fetch_best_ask(
@@ -101,18 +102,21 @@ class TradingEngine:
         Récupère le meilleur ask disponible sur le CLOB pour token_id.
         Retourne (price, size_usd) ou None si indisponible.
         FIX ENGINE-9: utilise self._get_http_session() au lieu d'une new session.
+        FIX P2: timeout explicite 5s pour éviter les hangs dans ExitManager.
         """
         url = f"{settings.polymarket_host}/book?token_id={token_id}"
         try:
-            session = self._get_http_session()
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    logger.debug(
-                        f"[ENGINE] _fetch_best_ask HTTP {resp.status} "
-                        f"for {token_id[:16]}..."
-                    )
-                    return None
-                data = await resp.json()
+            # FIX P2: timeout explicite 5s
+            async with asyncio.timeout(5.0):
+                session = self._get_http_session()
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        logger.debug(
+                            f"[ENGINE] _fetch_best_ask HTTP {resp.status} "
+                            f"for {token_id[:16]}..."
+                        )
+                        return None
+                    data = await resp.json()
 
             asks = data.get("asks") or []
             if not asks:
@@ -123,6 +127,9 @@ class TradingEngine:
             size_tokens = float(best["size"])
             size_usd = size_tokens * price
             return price, size_usd
+        except asyncio.TimeoutError:
+            logger.warning(f"[ENGINE] _fetch_best_ask timeout (5s) {token_id[:16]}")
+            return None
         except Exception as e:
             logger.debug(f"[ENGINE] _fetch_best_ask error: {e}")
             return None

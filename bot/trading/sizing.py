@@ -10,6 +10,7 @@ FIX BUG-8:   PositionSizer._capital synchronisé avec RiskManager.portfolio.tota
 FIX SIZER-1: TIERED_MULTIPLIERS configurable via .env.
 FIX SIZER-2: _parse_tiered_multipliers guard ValueError sur format invalide.
 FIX SIZER-3: calculate() guard conviction_score <= 0 → fallback min_trade_usdc.
+FIX P2:      Tiered parse error log en ERROR (pas warning) pour visibilité.
 FIX ZERO-HARDCODE: toutes les constantes lues depuis settings.
 """
 from __future__ import annotations
@@ -48,6 +49,8 @@ def _parse_tiered_multipliers(raw: str) -> list[TieredBand]:
 
     FIX SIZER-2: guard explicite sur split ':' manquant → ValueError propre
     avec message clair au lieu de crash silencieux.
+    FIX P2: log en ERROR (pas warning) si parse échoue — config silencieuse
+    est un problème majeur (l'utilisateur croit que ses tiers sont actifs).
     """
     if not raw or not raw.strip():
         return []
@@ -80,7 +83,11 @@ def _parse_tiered_multipliers(raw: str) -> list[TieredBand]:
                 max_v = float(hi)
             bands.append(TieredBand(min_usd=min_v, max_usd=max_v, multiplier=mult))
     except Exception as e:
-        logger.warning(f"[SIZER] TIERED_MULTIPLIERS parse error: {e} — disabling tiered")
+        # FIX P2: ERROR (pas warning) — config invalide = problème critique
+        logger.error(
+            f"[SIZER] TIERED_MULTIPLIERS parse error: {e} — "
+            f"disabling tiered (fallback Kelly pur)"
+        )
         return []
     bands.sort(key=lambda b: b.min_usd)
     return bands
