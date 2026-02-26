@@ -21,13 +21,15 @@ FIX CMD-1: mutations settings via object.__setattr__() (Pydantic v2)
   Avant: settings.__dict__['dry_run'] = False — ignoré par Pydantic v2.
   Après: object.__setattr__(settings, 'dry_run', False) — portable v1/v2.
 FEAT SIZER-2: /setcapital hot-reload PositionSizer
+FIX CMD-2: atomic .env write via tmp file
+FIX CMD-3: /positions age calculation timezone-safe (PostgreSQL)
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -62,7 +64,10 @@ def _build_tiered_string(capital: float) -> str:
 
 
 def _persist_tiered_to_env(tiered_str: str) -> bool:
-    """Ecrit / met à jour TIERED_MULTIPLIERS dans .env."""
+    """
+    Ecrit / met à jour TIERED_MULTIPLIERS dans .env de façon atomique.
+    FIX CMD-2: write to .tmp then replace to avoid corruption on kill.
+    """
     env_path = Path(".env")
     if not env_path.exists():
         logger.warning("[COMMANDS] .env introuvable — tiered non persisté")
@@ -76,7 +81,11 @@ def _persist_tiered_to_env(tiered_str: str) -> bool:
             )
         else:
             content = content.rstrip() + f'\n{line}\n'
-        env_path.write_text(content, encoding="utf-8")
+        
+        # FIX CMD-2: atomic write via tmp file
+        tmp_path = env_path.with_suffix('.env.tmp')
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(env_path)
         return True
     except Exception as e:
         logger.warning(f"[COMMANDS] .env write error: {e}")
@@ -221,7 +230,9 @@ class BotCommandHandler:
         for p in positions:
             age = ""
             if p.executed_at:
-                hours = (datetime.utcnow() - p.executed_at).total_seconds() / 3600
+                # FIX CMD-3: timezone-safe calculation (PostgreSQL aware datetime)
+                now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+                hours = (now_naive - p.executed_at).total_seconds() / 3600
                 age = f" ({hours:.0f}h)"
             question = (p.market_question or p.token_id or "?")[:35]
             lines.append(
@@ -234,7 +245,11 @@ class BotCommandHandler:
         await self._reply(update, "🛑 <b>Arrêt demandé…</b> Le bot va s'arrêter proprement.")
         logger.warning("[COMMANDS] /stop received via Telegram")
         if self.stop_callback:
-            asyncio.create_task(self.stop_callback())
+            task = asyncio.create_task(self.stop_callback())
+            # Add done callback to log exceptions
+            task.add_done_callback(
+                lambda t: t.exception() and logger.error(f"[COMMANDS] stop_callback error: {t.exception()}")
+            )
         else:
             os.kill(os.getpid(), 15)  # SIGTERM
 
