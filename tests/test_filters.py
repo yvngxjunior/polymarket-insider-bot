@@ -4,7 +4,7 @@ Couvre tous les checks individuels + le scoring global.
 v2.3: tests pour entry_timing_score (check #6)
 """
 import pytest
-from bot.trading.filters import ConvictionFilter, FilterResult
+from bot.trading.filters import ConvictionFilter
 
 
 @pytest.fixture
