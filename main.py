@@ -9,7 +9,7 @@ Architecture 7 phases + 3 background tasks:
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
   7. Performance report — win rate / PnL / trades          [périodique]
-  └ WalletRefresher    — refresh + discovery wallets      [background, 60min]
+  └ WalletRefresher    — refresh + discovery wallets      [background, 60s]
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
 
@@ -22,7 +22,7 @@ v2.8 fixes:
 v2.9 fixes:
   - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
   - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
-  - FIX RISK-6     INSERT portfolio_snapshot jamais commitié
+  - FIX RISK-6     INSERT portfolio_snapshot jamais committé
   - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
   - FIX FILTER-1   rate-limit query status case-sensitive
 
@@ -36,6 +36,9 @@ v3.1 fixes (pré-SaaS):
   - FIX ENGINE-9   _http_session partagée dans TradingEngine (plus de new session/appel)
   - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL (IF NOT EXISTS)
   - FIX MAIN-8     engine.close() dans asyncio.gather shutdown
+
+v3.2 fixes (phase 2 dashboard):
+  - FIX MAIN-9     interval_minutes=60 → interval_seconds=60 dans WalletRefresher
 """
 import asyncio
 import signal
@@ -437,10 +440,11 @@ async def run() -> None:
         client=client,
         insider_scanner=scanner,
     )
+    # FIX MAIN-9: interval_minutes=60 → interval_seconds=60
     refresher = WalletRefresher(
         scanner=scanner,
         notifier=notifier,
-        interval_minutes=60,
+        interval_seconds=60,  # ← Était interval_minutes=60 (= 60 MINUTES!)
         wallet_scanner=wallet_scanner,
     )
 
