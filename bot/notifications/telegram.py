@@ -31,7 +31,9 @@ class TelegramNotifier:
       - notify_llm_signal()    → recommandation GPT-4o-mini
       - notify_startup()       → démarrage du bot
 
-    FIX TELEGRAM-1: retry on TelegramError (timeout, 429 rate-limit)
+    FIX TELEGRAM-1: retry 3x sur TelegramError puis swallow (ne raise jamais)
+      Contrat: send() ne doit JAMAIS lever d'exception — le bot doit continuer
+      même si Telegram est down ou rate-limité.
     FIX TELEGRAM-2: wallet[-6:] safe (checks len first)
     """
 
@@ -42,24 +44,35 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     # Envoi brut
     # ------------------------------------------------------------------
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(TelegramError),
-        reraise=True,
+        reraise=True,  # reraise pour que le wrapper externe puisse catcher
     )
+    async def _send_with_retry(self, message: str) -> None:
+        """Envoi interne avec retry. Peut raise TelegramError après 3 tentatives."""
+        await self._bot.send_message(
+            chat_id=self._chat_id,
+            text=message,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
     async def send(self, message: str) -> None:
-        """FIX TELEGRAM-1: retries 3x with exponential backoff on TelegramError."""
+        """
+        Envoie un message Telegram.
+        FIX TELEGRAM-1: retry 3x via _send_with_retry(), puis log + swallow.
+        Contrat public: send() NE raise JAMAIS — le bot continue même si
+        Telegram est down, rate-limité ou le token est invalide.
+        """
         try:
-            await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=message,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
+            await self._send_with_retry(message)
         except TelegramError as e:
-            logger.error(f"Telegram send failed: {e}")
-            raise  # tenacity will retry
+            logger.error(f"[TELEGRAM] send() failed after 3 retries: {e}")
+        except Exception as e:
+            logger.error(f"[TELEGRAM] send() unexpected error: {e}")
 
     # ------------------------------------------------------------------
     # Trade copié
