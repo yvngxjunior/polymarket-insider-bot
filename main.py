@@ -3,7 +3,7 @@ PolyInsider Bot v2.4
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
-  2. Convergence scan   — plusieurs insiders sur même marché
+  2. Convergence scan   — plusieurs insiders sur même marché (via ConvergenceDetector)
   3. Insider copy       — copy trading wallets scorés
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
@@ -30,7 +30,7 @@ from bot.trading.polymarket import PolymarketDataClient
 from bot.scanner.insider import InsiderScanner
 from bot.scanner.whale import WhaleTracker
 from bot.scanner.wallet_refresher import WalletRefresher
-from bot.scanner.convergence import ConvergenceScanner
+from bot.scanner.convergence import ConvergenceDetector
 from bot.scanner.arbitrage import ArbitrageScanner
 from bot.scanner.market_scanner import MarketScanner
 from bot.trading.engine import TradingEngine
@@ -65,12 +65,14 @@ async def process_new_trade(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
     health_monitor: HealthMonitor,
+    convergence_detector: ConvergenceDetector,
 ) -> None:
     token_id     = trade.get("asset", "")
     price        = float(trade.get("price", 0))
     amount       = float(trade.get("usdcSize", 0))
     side         = trade.get("side", "BUY").upper()
     condition_id = trade.get("conditionId", "")
+    timestamp    = float(trade.get("timestamp", 0) or 0)
 
     if not token_id or price <= 0 or amount <= 0:
         return
@@ -85,6 +87,35 @@ async def process_new_trade(
     whitelist = settings.get_whitelist()
     is_whitelisted = wallet_address.lower() in whitelist
     effective_score = 1.0 if is_whitelisted else wallet_score
+
+    # Étape 0b — Convergence detection (in-process, per trade)
+    if token_id and condition_id and timestamp > 0:
+        try:
+            conv_signal = await convergence_detector.process_trade(
+                wallet=wallet_address,
+                token_id=token_id,
+                condition_id=condition_id,
+                side=side,
+                amount=amount,
+                price=price,
+                timestamp=timestamp,
+            )
+            if conv_signal:
+                logger.info(
+                    f"[CONV] {conv_signal.strength} — "
+                    f"{conv_signal.wallet_count} insiders on {token_id[:16]}... "
+                    f"conf={conv_signal.confidence:.0%}"
+                )
+                await notifier.notify_convergence({
+                    "count":        conv_signal.wallet_count,
+                    "question":     token_id,
+                    "condition_id": condition_id,
+                    "wallets":      conv_signal.wallets,
+                    "side":         side,
+                    "avg_price":    conv_signal.avg_price,
+                })
+        except Exception as e:
+            logger.debug(f"[CONV] process_trade error: {e}")
 
     # Étape 1 — Filtre de conviction (losing streak + timing + bet + prix + wallet)
     f = conv_filter.evaluate(
@@ -147,7 +178,7 @@ async def process_new_trade(
 async def main_loop(
     scanner: InsiderScanner,
     whale_tracker: WhaleTracker,
-    convergence_scanner: ConvergenceScanner,
+    convergence_detector: ConvergenceDetector,
     arbitrage_scanner: ArbitrageScanner,
     market_scanner: MarketScanner,
     llm_agent: LLMAgent,
@@ -185,12 +216,7 @@ async def main_loop(
                     price=event["price"],
                 )
 
-            # Phase 2 — Convergence scan
-            for sig in await convergence_scanner.scan():
-                logger.info(f"[CONV] {sig.get('count', 0)} insiders → {sig.get('question', '')[:60]}")
-                await notifier.notify_convergence(sig)
-
-            # Phase 3 — Insider copy trading
+            # Phase 2+3 — Insider copy trading + détection de convergence par trade
             with get_db() as db:
                 wallets = (
                     db.query(TrackedWallet)
@@ -233,6 +259,7 @@ async def main_loop(
                         performance_tracker=performance_tracker,
                         conv_filter=conv_filter, sizer=sizer,
                         health_monitor=health_monitor,
+                        convergence_detector=convergence_detector,
                     )
 
             # Phase 4 — Arbitrage cross-platform
@@ -320,21 +347,21 @@ async def run() -> None:
 
     init_db()
 
-    client              = PolymarketDataClient()
-    notifier            = TelegramNotifier()
-    risk_manager        = RiskManager()
-    engine              = TradingEngine()
-    scanner             = InsiderScanner(client=client)
-    whale_tracker       = WhaleTracker(client=client)
-    convergence_scanner = ConvergenceScanner(client=client)
-    arbitrage_scanner   = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
-    market_scanner      = MarketScanner(max_concurrent=8)
-    llm_agent           = LLMAgent()
-    position_manager    = PositionManager()
-    performance_tracker = PerformanceTracker()
-    conv_filter         = ConvictionFilter()
-    sizer               = PositionSizer()
-    exit_manager        = ExitManager(
+    client               = PolymarketDataClient()
+    notifier             = TelegramNotifier()
+    risk_manager         = RiskManager()
+    engine               = TradingEngine()
+    scanner              = InsiderScanner(client=client)
+    whale_tracker        = WhaleTracker(client=client)
+    convergence_detector = ConvergenceDetector(client=client)
+    arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
+    market_scanner       = MarketScanner(max_concurrent=8)
+    llm_agent            = LLMAgent()
+    position_manager     = PositionManager()
+    performance_tracker  = PerformanceTracker()
+    conv_filter          = ConvictionFilter()
+    sizer                = PositionSizer()
+    exit_manager         = ExitManager(
         risk_manager=risk_manager,
         notifier=notifier,
         engine=engine,
@@ -375,7 +402,7 @@ async def run() -> None:
     main_task = asyncio.create_task(
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
-            convergence_scanner=convergence_scanner,
+            convergence_detector=convergence_detector,
             arbitrage_scanner=arbitrage_scanner, market_scanner=market_scanner,
             llm_agent=llm_agent, engine=engine, notifier=notifier, client=client,
             risk_manager=risk_manager, position_manager=position_manager,
