@@ -66,14 +66,6 @@ class RiskManager:
     """
     Gestionnaire de risques — Kelly Criterion + limites dynamiques.
     Toutes les constantes sont lues depuis settings (zéro hardcode).
-
-    Paramètres configurables dans .env :
-      INITIAL_CAPITAL         Capital de départ (défaut: 500)
-      MAX_POSITIONS           Positions simultanées max (défaut: 10)
-      DAILY_LOSS_LIMIT_PCT    Perte journalière max % (défaut: 0.15)
-      DRAWDOWN_LIMIT_PCT      Drawdown max depuis le pic % (défaut: 0.25)
-      KELLY_FRACTION          Fraction Kelly (défaut: 0.25 = Quarter-Kelly)
-      CONVERGENCE_BOOST       Multiplicateur convergence (défaut: 1.5)
     """
 
     @property
@@ -107,8 +99,7 @@ class RiskManager:
         self._load_from_db()
 
     def open_positions_count(self) -> int:
-        """API publique — nombre de positions ouvertes en mémoire.
-        Préférer cette méthode à l'accès direct à _open_positions."""
+        """API publique — nombre de positions ouvertes en mémoire."""
         return len(self._open_positions)
 
     def _load_from_db(self) -> None:
@@ -151,22 +142,22 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """UPSERT portable SQLite + PostgreSQL.
-        FIX RISK-8: updated_at passé comme objet datetime (pas ISO string)
-        pour compatibilité PostgreSQL native.
+        """
+        UPSERT portable SQLite + PostgreSQL.
+        FIX P1: datetime converti en ISO string pour compatibilité SQLite.
         """
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)
-            # FIX RISK-8: datetime object, pas isoformat() string
-            now = datetime.utcnow()
+            # FIX P1: ISO string pour compatibilité multi-dialecte (SQLite + PG)
+            now_str = datetime.utcnow().isoformat()
             params = {
                 "cap":  self.portfolio.total_capital,
                 "peak": self.portfolio.peak_capital,
                 "dpnl": self.portfolio.daily_pnl,
                 "drd":  self.portfolio.daily_reset_date.isoformat(),
                 "csv":  csv,
-                "now":  now,
+                "now":  now_str,
             }
             with engine.connect() as conn:
                 result = conn.execute(

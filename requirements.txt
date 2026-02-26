@@ -12,6 +12,8 @@ py-clob-client>=0.12.0
 # ── Database ────────────────────────────────────────────────
 sqlalchemy>=2.0.0
 alembic>=1.13.0
+# FIX P1: PostgreSQL driver requis pour Phase 1 migration
+psycopg2-binary>=2.9.0
 
 # ── Notifications ───────────────────────────────────────────
 python-telegram-bot>=20.0
@@ -22,6 +24,7 @@ loguru>=0.7.0
 # ── HTTP & Retry ────────────────────────────────────────────
 requests>=2.31.0
 tenacity>=8.0.0
+httpx>=0.27.0
 
 # ── LLM Agent (optionnel — requis si LLM_ENABLED=true) ──────
 openai>=1.0.0

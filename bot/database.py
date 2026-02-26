@@ -67,8 +67,6 @@ class CopiedTrade(Base):
     side = Column(String(4))
     amount_usdc = Column(Float)
     price = Column(Float)
-    # FIX DB-2: pnl_usdc requis par performance.py pour le vrai P&L
-    # Mis à jour par ExitManager à la clôture de la position (TP1/TP2/SL/RESOLVING)
     pnl_usdc = Column(Float, nullable=True, default=None)
     status = Column(SAEnum(TradeStatus), default=TradeStatus.PENDING)
     skip_reason = Column(String(200), nullable=True)
@@ -97,7 +95,7 @@ class WalletPerformance(Base):
 
 class PortfolioSnapshot(Base):
     """
-    FIX #1 — Persistance du capital réel et des positions ouvertes.
+    Persistance du capital réel et des positions ouvertes.
     Une seule row (id=1) mise à jour à chaque changement.
     Permet au RiskManager de retrouver son état exact après redémarrage.
     """
@@ -107,16 +105,12 @@ class PortfolioSnapshot(Base):
     total_capital = Column(Float, default=500.0)
     peak_capital = Column(Float, default=500.0)
     daily_pnl = Column(Float, default=0.0)
-    daily_reset_date = Column(String(10), default="")  # ISO date YYYY-MM-DD
-    # FIX #2 — open_positions : CSV des token_ids ouverts
+    daily_reset_date = Column(String(10), default="")
     open_positions_csv = Column(Text, default="")
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 # Colonnes à ajouter si absentes (migration safe sur base existante)
-# FIX DB-3: support SQLite ET PostgreSQL
-# - SQLite  : ALTER TABLE t ADD COLUMN c def  (sans IF NOT EXISTS, on catch 'duplicate column')
-# - PostgreSQL: ALTER TABLE t ADD COLUMN IF NOT EXISTS c def  (natif depuis PG 9.6)
 _SAFE_MIGRATIONS = [
     ("tracked_wallets",    "consecutive_losses",  "INTEGER NOT NULL DEFAULT 0"),
     ("tracked_wallets",    "entry_timing_score",  "REAL NOT NULL DEFAULT 0.5"),
@@ -127,17 +121,25 @@ _SAFE_MIGRATIONS = [
 
 def _run_safe_migrations(conn, is_postgres: bool) -> None:
     """
-    FIX DB-3: exécute les migrations ALTER TABLE sur SQLite ET PostgreSQL.
-    PostgreSQL utilise 'ADD COLUMN IF NOT EXISTS' (PG >= 9.6).
+    FIX P1: exécute les migrations ALTER TABLE sur SQLite ET PostgreSQL.
+    PostgreSQL utilise DO $$ block (compatible toutes versions >= 8.0).
     SQLite utilise 'ADD COLUMN' avec catch de 'duplicate column'.
     """
     for table, column, definition in _SAFE_MIGRATIONS:
         try:
             if is_postgres:
-                # PostgreSQL: IF NOT EXISTS natif, pas d'exception sur doublon
-                conn.execute(text(
-                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
-                ))
+                # FIX P1: DO $$ block compatible PG toutes versions (pas IF NOT EXISTS)
+                conn.execute(text(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name='{table}' AND column_name='{column}'
+                        ) THEN
+                            ALTER TABLE {table} ADD COLUMN {column} {definition};
+                        END IF;
+                    END $$;
+                """))
                 conn.commit()
                 logger.debug(f"[DB] PG migration OK: {table}.{column}")
             else:
@@ -158,20 +160,17 @@ def init_db() -> None:
     """
     Crée toutes les tables si elles n'existent pas.
     Applique aussi les migrations ALTER TABLE sécurisées.
-
-    FIX DB-1 — Seed portfolio_snapshot row id=1 compatible SQLite + PostgreSQL.
-    FIX DB-3 — Migrations sur SQLite ET PostgreSQL.
     """
     Base.metadata.create_all(bind=engine)
 
-    # FIX DB-3: détection du dialecte
+    # Détection du dialecte
     db_url = settings.database_url.lower()
     is_postgres = "postgresql" in db_url or "postgres" in db_url
 
     with engine.connect() as conn:
         _run_safe_migrations(conn, is_postgres=is_postgres)
 
-    # FIX DB-1 — Seed de la row portfolio_snapshot si absente
+    # Seed de la row portfolio_snapshot si absente
     today = date.today().isoformat()
     now = datetime.utcnow().isoformat()
     with engine.connect() as conn:
