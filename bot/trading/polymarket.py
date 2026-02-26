@@ -7,15 +7,13 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
-CLOB_BASE = "https://clob.polymarket.com"
-
 
 class PolymarketDataClient:
     """
     Client HTTP async pour les APIs publiques Polymarket.
-    - Data API : historique trades, positions, wallets, leaderboard
-    - Gamma API : métadonnées des marchés
-    - CLOB API  : trades globaux (whale scan)
+    - Data API : trades, positions, activité, leaderboard  (data-api.polymarket.com)
+    - Gamma API: métadonnées des marchés               (gamma-api.polymarket.com)
+    Aucun endpoint nécessite d'auth pour la lecture publique.
     """
 
     def __init__(self):
@@ -29,16 +27,10 @@ class PolymarketDataClient:
             timeout=15.0,
             headers={"User-Agent": "PolyInsiderBot/1.0"},
         )
-        self._clob_client = httpx.AsyncClient(
-            base_url=CLOB_BASE,
-            timeout=15.0,
-            headers={"User-Agent": "PolyInsiderBot/1.0"},
-        )
 
     async def close(self):
         await self._data_client.aclose()
         await self._gamma_client.aclose()
-        await self._clob_client.aclose()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def get_wallet_trades(
@@ -55,7 +47,6 @@ class PolymarketDataClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            # La réponse peut être une liste directe ou {history: [...]}
             if isinstance(data, list):
                 return data
             return data.get("history", data.get("data", []))
@@ -70,31 +61,32 @@ class PolymarketDataClient:
         limit: int = 100
     ) -> list[dict]:
         """
-        Récupère les gros trades récents via le CLOB API (/trades).
-        L'endpoint /activity de la Data API requiert un user spécifique —
-        on utilise donc /trades du CLOB qui est public et global.
+        Récupère les gros trades récents via Data API /trades (public, sans auth).
+        Cf. https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
         """
         try:
-            resp = await self._clob_client.get(
+            resp = await self._data_client.get(
                 "/trades",
                 params={"limit": limit}
             )
             resp.raise_for_status()
             data = resp.json()
-            trades = data if isinstance(data, list) else data.get("data", [])
-            return [
-                {
-                    "transactionHash": t.get("transaction_hash", t.get("id", "")),
-                    "maker":           t.get("maker_address", t.get("maker", "")),
-                    "usdcSize":        t.get("size", t.get("usdcSize", 0)),
-                    "conditionId":     t.get("condition_id", t.get("market", "")),
-                    "asset":           t.get("asset_id", t.get("token_id", "")),
+            trades = data if isinstance(data, list) else data.get("data", data.get("trades", []))
+            result = []
+            for t in trades:
+                size = float(t.get("size", t.get("usdcSize", 0)))
+                if size < min_amount:
+                    continue
+                result.append({
+                    "transactionHash": t.get("transactionHash", t.get("transaction_hash", t.get("id", ""))),
+                    "maker":           t.get("maker", t.get("maker_address", "")),
+                    "usdcSize":        size,
+                    "conditionId":     t.get("conditionId", t.get("condition_id", t.get("market", ""))),
+                    "asset":           t.get("asset", t.get("asset_id", t.get("token_id", ""))),
                     "side":            t.get("side", "BUY"),
-                    "price":           t.get("price", 0),
-                }
-                for t in trades
-                if float(t.get("size", t.get("usdcSize", 0))) >= min_amount
-            ]
+                    "price":           float(t.get("price", 0)),
+                })
+            return result
         except Exception as e:
             logger.error(f"get_recent_large_trades: {e}")
             return []
@@ -143,8 +135,8 @@ class PolymarketDataClient:
         limit: int = 150
     ) -> list[dict]:
         """
-        Récupère les meilleurs traders via /v1/leaderboard.
-        Max 50 par page — on pagine jusqu'à `limit` résultats.
+        Récupère les meilleurs traders via /v1/leaderboard (Data API, public).
+        Max 50 par page — pagination par offset jusqu'à `limit` résultats.
         """
         results: list[dict] = []
         page_size = 50
@@ -168,7 +160,7 @@ class PolymarketDataClient:
                     break
                 results.extend(page)
                 if len(page) < page_size:
-                    break   # dernière page
+                    break
                 offset += page_size
             except Exception as e:
                 logger.error(f"get_top_traders (offset={offset}): {e}")
