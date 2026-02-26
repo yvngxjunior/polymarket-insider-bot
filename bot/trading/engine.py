@@ -22,6 +22,14 @@ class TradingEngine:
     FIX P0: le RiskManager est désormais injecté depuis main.py (instance partagée).
     L'ancienne version créait son propre RiskManager interne isolé → les limites
     daily loss, drawdown et max_positions n'étaient jamais appliquées en LIVE.
+
+    FIX ENGINE-1: copy_trade() retourne None (pas le record FAILED) en cas d'exception
+    → main.py ne peut plus appeler register_position() sur un trade raté.
+
+    FIX ENGINE-2: close_position() guard entry_price <= 0 avant division.
+
+    FIX ENGINE-3: tx_hash manquant → "MISSING_TX" + warning au lieu de string vide
+    silencieuse + log corrigé (tx_hash or "")[:12] pour éviter TypeError.
     """
 
     def __init__(self, risk_manager: RiskManager):
@@ -31,13 +39,17 @@ class TradingEngine:
 
     def _get_client(self) -> ClobClient:
         if self._client is None:
-            self._client = ClobClient(
-                host=settings.polymarket_host,
-                key=settings.private_key,
-                chain_id=settings.chain_id,
-                signature_type=2,
-                funder=settings.proxy_wallet,
-            )
+            try:
+                self._client = ClobClient(
+                    host=settings.polymarket_host,
+                    key=settings.private_key,
+                    chain_id=settings.chain_id,
+                    signature_type=2,
+                    funder=settings.proxy_wallet,
+                )
+            except Exception as e:
+                logger.error(f"[ENGINE] ClobClient init failed: {e}")
+                raise
         return self._client
 
     async def copy_trade(
@@ -78,19 +90,31 @@ class TradingEngine:
             )
             signed_order = client.create_market_order(order_args)
             response = client.post_order(signed_order)
-            tx_hash = response.get("orderID", "")
+
+            # FIX ENGINE-3: tx_hash manquant → warning explicite au lieu de string vide
+            tx_hash = response.get("orderID") or "MISSING_TX"
+            if tx_hash == "MISSING_TX":
+                logger.warning(
+                    f"[ENGINE] Missing orderID in CLOB response "
+                    f"token={token_id[:20]} side={side_const}"
+                )
+
             trade_record.status = TradeStatus.EXECUTED
             trade_record.tx_hash = tx_hash
             trade_record.executed_at = datetime.utcnow()
             # register_position est appelé dans main.py après copy_trade()
             logger.success(
                 f"✅ Trade EXECUTED: {side} ${source_amount} USDC "
-                f"on {market_question[:40] or token_id[:20]}... | TX: {tx_hash[:12]}..."
+                f"on {market_question[:40] or token_id[:20]}... | TX: {(tx_hash or '')[:12]}..."
             )
         except Exception as e:
             trade_record.status = TradeStatus.FAILED
             trade_record.skip_reason = str(e)[:200]
             logger.error(f"Trade FAILED: {e} | token={token_id[:20]}...")
+            self._save_trade(trade_record)
+            # FIX ENGINE-1: retour None → main.py ne peut PAS appeler
+            # register_position() sur un trade raté (plus de position fantôme)
+            return None
 
         self._save_trade(trade_record)
         return trade_record
@@ -102,7 +126,23 @@ class TradingEngine:
         amount_usdc: float,
         market_question: str = "",
     ) -> bool:
-        shares_to_sell = round(amount_usdc / entry_price, 4) if entry_price > 0 else 0
+        # FIX ENGINE-2: guard entry_price <= 0 avant division → évite ordre invalide
+        if entry_price <= 0:
+            logger.error(
+                f"[ENGINE] close_position aborted: invalid entry_price={entry_price} "
+                f"token={token_id[:20]}..."
+            )
+            return False
+
+        shares_to_sell = round(amount_usdc / entry_price, 4)
+
+        if shares_to_sell <= 0:
+            logger.error(
+                f"[ENGINE] close_position aborted: computed 0 shares "
+                f"(amount_usdc={amount_usdc} / entry_price={entry_price})"
+            )
+            return False
+
         label = market_question[:40] or token_id[:20]
 
         if settings.dry_run:
@@ -119,10 +159,10 @@ class TradingEngine:
             )
             signed_order = client.create_market_order(order_args)
             response = client.post_order(signed_order)
-            tx_hash = response.get("orderID", "")
+            tx_hash = response.get("orderID") or "MISSING_TX"
             logger.success(
                 f"✅ Position CLOSED: SELL {shares_to_sell} shares "
-                f"on {label}... | TX: {tx_hash[:12]}..."
+                f"on {label}... | TX: {(tx_hash or '')[:12]}..."
             )
             return True
         except Exception as e:
