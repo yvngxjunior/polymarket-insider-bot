@@ -64,6 +64,11 @@ export interface Wallet {
   entry_timing_score: number
   first_seen: string
   last_activity: string
+  // Polymarket profile enrichment
+  polymarket_username: string | null
+  polymarket_display_name: string | null
+  polymarket_pfp: string | null
+  polymarket_url: string
 }
 
 export interface WalletsResponse {

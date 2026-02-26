@@ -1,7 +1,7 @@
 """
 Wallet Refresher — PolyInsider Bot
 =====================================
-Tâche de fond qui s'exécute toutes les N minutes.
+Tâche de fond qui s'exécute toutes les N secondes.
 Effectue deux opérations distinctes:
 
   1. REFRESH (via InsiderScanner.refresh_tracked_wallets)
@@ -14,16 +14,20 @@ Effectue deux opérations distinctes:
      — Alerte Telegram pour chaque nouveau wallet qualifié
 
 La séparation refresh/discovery est importante:
-  - refresh: rapide, wallets connus, mis à jour fréquemment (60 min)
-  - discovery: lent, 200+ candidats, moins fréquent (tous les 3h par défaut)
+  - refresh: rapide, wallets connus, mis à jour fréquemment (60 sec)
+  - discovery: lent, 200+ candidats, moins fréquent (toutes les 60 itérations = ~1h)
 
 FIX REFRESHER-1 — _known_wallets chargé depuis DB au __init__.
   Avant: set() vide → flood Telegram au premier refresh post-restart.
   Après: _load_known_wallets() charge les adresses is_active=True en DB.
 
 FIX REFRESHER-2 — Discovery immédiat si DB vide au démarrage.
-  Avant: avec DB vide, discovery attendait le cycle 3 (3h).
+  Avant: avec DB vide, discovery attendait le cycle 60 (~1h).
   Après: si Refresh #1 trouve 0 wallets actifs, discovery est lancé immédiatement.
+
+FIX REFRESHER-3 — interval_seconds (était interval_minutes=60 → 60 MINUTES!).
+  Avant: interval_minutes=60 → refresh toutes les 60 MINUTES.
+  Après: interval_seconds=60 → refresh toutes les 60 SECONDES.
 """
 from __future__ import annotations
 
@@ -42,8 +46,8 @@ class WalletRefresher:
     Args:
         scanner:           InsiderScanner (analyse et refresh des wallets connus)
         notifier:          TelegramNotifier (alertes)
-        interval_minutes:  fréquence du refresh en minutes (défaut: 60)
-        discovery_ratio:   lance discovery tous les N refreshs (défaut: 3 = toutes les 3h)
+        interval_seconds:  fréquence du refresh en SECONDES (défaut: 60s)
+        discovery_ratio:   lance discovery tous les N refreshs (défaut: 60 = toutes les ~1h)
         wallet_scanner:    WalletScanner optionnel (injecté ou créé lazy)
     """
 
@@ -51,13 +55,13 @@ class WalletRefresher:
         self,
         scanner: InsiderScanner,
         notifier: TelegramNotifier,
-        interval_minutes: int = 60,
-        discovery_ratio: int = 3,
+        interval_seconds: int = 60,   # FIX: était interval_minutes=60 (= 60 MINUTES!)
+        discovery_ratio: int = 60,    # discovery toutes les 60 itérations (~1h)
         wallet_scanner=None,
     ) -> None:
         self.scanner = scanner
         self.notifier = notifier
-        self.interval_minutes = interval_minutes
+        self.interval_seconds = interval_seconds  # FIX: secondes, pas minutes
         self.discovery_ratio = discovery_ratio
         self._wallet_scanner = wallet_scanner
         self._refresh_count: int = 0
@@ -115,8 +119,9 @@ class WalletRefresher:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._loop(), name="wallet_refresher")
         logger.info(
-            f"[REFRESHER] Started — interval={self.interval_minutes}min "
-            f"discovery every {self.discovery_ratio} cycles"
+            f"[REFRESHER] Started — interval={self.interval_seconds}s "
+            f"discovery every {self.discovery_ratio} cycles (~"
+            f"{self.interval_seconds * self.discovery_ratio // 60}min)"
         )
 
     async def stop(self) -> None:
@@ -139,7 +144,7 @@ class WalletRefresher:
         await self._run_refresh()
 
         # FIX REFRESHER-2: si DB vide apres le premier refresh,
-        # on lance immediatement un discovery plutot d'attendre 3h.
+        # on lance immediatement un discovery plutot d'attendre 1h.
         if self._count_active_wallets() == 0:
             logger.info(
                 "[REFRESHER] DB empty after Refresh #1 — "
@@ -149,9 +154,10 @@ class WalletRefresher:
 
         while not self._stop_event.is_set():
             try:
+                # FIX: utilise interval_seconds (pas interval_minutes * 60)
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=self.interval_minutes * 60,
+                    timeout=self.interval_seconds,
                 )
             except asyncio.TimeoutError:
                 pass
