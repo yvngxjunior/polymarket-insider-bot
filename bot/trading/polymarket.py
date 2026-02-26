@@ -14,15 +14,12 @@ class PolymarketDataClient:
     - Gamma API: métadonnées des marchés               (gamma-api.polymarket.com)
     Aucun endpoint ne nécessite d'auth pour la lecture publique.
 
-    Champs réels de /trades (cf. docs Polymarket) :
-      proxyWallet, side, asset, conditionId, size, price,
-      timestamp, title, transactionHash, outcome
-
-    FIX: les try/except internes ont été retirés des méthodes décorées @retry.
-    Avant, les exceptions étaient catchées en interne → tenacity ne les voyait
-    jamais → les 3 tentatives de retry ne se déclenchaient jamais.
-    Maintenant les exceptions remontent à tenacity qui gère le retry/backoff.
-    Les erreurs sont loguées au niveau WARNING (visible) et non DEBUG (silencieux).
+    FIX BUG-9: get_top_traders() ne porte plus le décorateur @retry global.
+    La boucle de pagination interne appelait raise_for_status() sur chaque page.
+    Si une page levait une exception, tenacity relançait toute la méthode depuis
+    l'offset=0 → résultats dupliqués (ex: 200+200 = 400 entrées pour limit=300).
+    Correction: retry appliqué par page via _fetch_leaderboard_page(), et la
+    boucle principale dans get_top_traders() accumule sans retry global.
     """
 
     def __init__(self):
@@ -48,7 +45,6 @@ class PolymarketDataClient:
         limit: int = 100,
         offset: int = 0
     ) -> list[dict]:
-        """Récupère l'historique des trades d'un wallet."""
         resp = await self._data_client.get(
             "/activity",
             params={"user": wallet, "limit": limit, "offset": offset}
@@ -65,15 +61,6 @@ class PolymarketDataClient:
         min_amount: float,
         limit: int = 100
     ) -> list[dict]:
-        """
-        Récupère les gros trades récents via Data API /trades.
-        - Trié par timestamp DESC (plus récent en premier) — garanti par l'API.
-        - Filtre CASH côté serveur (filterType + filterAmount) pour n'obtenir
-          que les trades >= min_amount USDC sans post-filtrage client.
-        - takerOnly=false pour capturer maker ET taker.
-
-        Champ wallet réel : proxyWallet (pas 'maker').
-        """
         resp = await self._data_client.get(
             "/trades",
             params={
@@ -109,7 +96,6 @@ class PolymarketDataClient:
         wallet: str,
         limit: int = 100
     ) -> list[dict]:
-        """Récupère les positions ouvertes d'un wallet."""
         resp = await self._data_client.get(
             "/positions",
             params={"user": wallet, "limit": limit}
@@ -122,7 +108,6 @@ class PolymarketDataClient:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def get_market_info(self, condition_id: str) -> Optional[dict]:
-        """Récupère les infos d'un marché via son condition_id."""
         resp = await self._gamma_client.get(
             "/markets",
             params={"conditionId": condition_id}
@@ -133,7 +118,10 @@ class PolymarketDataClient:
             return markets[0] if markets else None
         return markets.get("markets", [None])[0]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    # FIX BUG-9: @retry retiré de get_top_traders().
+    # Le retry est désormais appliqué page par page via _fetch_leaderboard_page().
+    # La boucle principale ne porte pas de retry global pour éviter les doublons
+    # en cas de reprise depuis offset=0 sur une exception tardive.
     async def get_top_traders(
         self,
         limit: int = 150
@@ -141,24 +129,14 @@ class PolymarketDataClient:
         """
         Récupère les meilleurs traders via /v1/leaderboard.
         Max 50 par page — pagination par offset.
+        Chaque page est fetchée avec retry individuel (pas le tout).
         """
         results: list[dict] = []
         page_size = 50
         offset = 0
 
         while len(results) < limit:
-            resp = await self._data_client.get(
-                "/v1/leaderboard",
-                params={
-                    "limit":    page_size,
-                    "offset":   offset,
-                    "sortBy":   "VOL",
-                    "interval": "ALL",
-                }
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            page = data if isinstance(data, list) else data.get("leaderboard", data.get("data", []))
+            page = await self._fetch_leaderboard_page(offset=offset, page_size=page_size)
             if not page:
                 break
             results.extend(page)
@@ -167,3 +145,23 @@ class PolymarketDataClient:
             offset += page_size
 
         return results[:limit]
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def _fetch_leaderboard_page(self, offset: int, page_size: int) -> list[dict]:
+        """
+        FIX BUG-9: retry appliqué par page, pas sur la boucle entière.
+        En cas d'échec sur une page, seule cette page est retentée (3x),
+        pas toute la pagination depuis l'offset 0.
+        """
+        resp = await self._data_client.get(
+            "/v1/leaderboard",
+            params={
+                "limit":    page_size,
+                "offset":   offset,
+                "sortBy":   "VOL",
+                "interval": "ALL",
+            }
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else data.get("leaderboard", data.get("data", []))

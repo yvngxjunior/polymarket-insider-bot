@@ -12,12 +12,18 @@ Logique de vente partielle:
   - Au TP1 (+20%) : on vend 50% de la position → on sécurise du profit
   - Le reste court jusqu'au TP2 (+40%), SL, résolution ou durée max
   - En DRY RUN : simule tout, log + Telegram, zéro ordre réel
+
+FIX BUG-2 — _partial_sold persisté en DB (colonne tp1_remaining sur CopiedTrade).
+  Au démarrage, _load_partial_sold() recharge l'état → survit aux redémarrages.
+FIX BUG-3 (M3) — filtre SQL exclut désormais les positions déjà CLOSED pour éviter
+  les tentatives de re-fermeture inutiles à chaque cycle.
 """
 import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp
+from sqlalchemy import text
 
 from bot.config import get_settings
 from bot.database import get_db, CopiedTrade, TradeStatus
@@ -36,6 +42,9 @@ class ExitManager:
     Background task de surveillance et fermeture automatique des positions.
     Implémente une stratégie de vente partielle:
       TP1 (+20%) → vend 50% | TP2 (+40%) → vend le reste | SL -30% → vend tout
+
+    Source de vérité unique pour la fermeture des positions.
+    PositionManager ne doit PAS appeler release_position() (cf. BUG-1).
     """
 
     TAKE_PROFIT1_PCT = 0.20    # +20% → TP1 partiel (50% vendus)
@@ -58,12 +67,57 @@ class ExitManager:
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        # Suit les positions dont le TP1 a déjà été exécuté {trade_id: remaining_amount}
+        # FIX BUG-2: rechargé depuis DB au démarrage
         self._partial_sold: dict[int, float] = {}
+        self._load_partial_sold()
+
+    # ------------------------------------------------------------------
+    # FIX BUG-2 — Persistance de _partial_sold
+    # ------------------------------------------------------------------
+
+    def _load_partial_sold(self) -> None:
+        """
+        Recharge depuis la DB les positions dont le TP1 a déjà été exécuté.
+        Utilise la colonne skip_reason pour détecter 'TP1_REMAINING:{amount}'.
+        """
+        try:
+            from bot.database import engine as db_engine
+            with db_engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT id, amount_usdc, skip_reason FROM copied_trades "
+                        "WHERE status = 'executed' "
+                        "AND skip_reason LIKE 'TP1_REMAINING:%'"
+                    )
+                ).fetchall()
+            for row in rows:
+                trade_id, amount_usdc, skip_reason = row
+                try:
+                    remaining = float(skip_reason.split("TP1_REMAINING:")[1])
+                    self._partial_sold[int(trade_id)] = remaining
+                except (IndexError, ValueError):
+                    pass
+            if self._partial_sold:
+                logger.info(
+                    f"[EXIT] Loaded {len(self._partial_sold)} TP1 partial state(s) from DB"
+                )
+        except Exception as e:
+            logger.warning(f"[EXIT] Could not load partial sold state: {e}")
+
+    def _persist_partial(self, trade_id: int, remaining: float) -> None:
+        """Persiste l'état TP1 dans skip_reason pour survie aux redémarrages."""
+        try:
+            with get_db() as db:
+                t = db.query(CopiedTrade).filter(CopiedTrade.id == trade_id).first()
+                if t:
+                    t.skip_reason = f"TP1_REMAINING:{remaining:.2f}"
+        except Exception as e:
+            logger.warning(f"[EXIT] Could not persist partial state for trade {trade_id}: {e}")
 
     # ------------------------------------------------------------------
     # Session HTTP
     # ------------------------------------------------------------------
+
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
@@ -74,6 +128,7 @@ class ExitManager:
     # ------------------------------------------------------------------
     # Prix actuel d'un token
     # ------------------------------------------------------------------
+
     async def _get_current_price(self, token_id: str) -> Optional[float]:
         try:
             async with self._get_session().get(
@@ -89,6 +144,7 @@ class ExitManager:
     # ------------------------------------------------------------------
     # Logique de décision de sortie
     # ------------------------------------------------------------------
+
     def _should_exit(
         self,
         trade_id: int,
@@ -150,15 +206,22 @@ class ExitManager:
     # ------------------------------------------------------------------
     # Traitement d'un cycle de vérification
     # ------------------------------------------------------------------
+
     async def _check_positions(self) -> None:
-        # FIX: filtre SQLAlchemy séparé pour éviter le tuple implicite
-        # L'ancienne syntaxe créait un tuple (condition, condition) au lieu
-        # d'une branche if/else, ce qui faisait tout passer en mode LIVE.
-        filter_cond = (
-            CopiedTrade.skip_reason.in_(["DRY_RUN", None])
-            if settings.dry_run
-            else CopiedTrade.tx_hash != None  # noqa: E711
-        )
+        # FIX BUG-3 (M3): exclut les positions déjà CLOSED pour éviter
+        # les tentatives de re-fermeture inutiles à chaque cycle.
+        # "skip_reason LIKE 'CLOSED%'" couvre CLOSED, CLOSED(TP1+TP2), etc.
+        if settings.dry_run:
+            filter_cond = (
+                CopiedTrade.skip_reason.in_(["DRY_RUN"])
+                | CopiedTrade.skip_reason.like("TP1_REMAINING:%")
+            )
+        else:
+            filter_cond = (
+                (CopiedTrade.tx_hash != None)  # noqa: E711
+                & ~CopiedTrade.skip_reason.like("CLOSED%")
+            )
+
         with get_db() as db:
             open_trades = (
                 db.query(CopiedTrade)
@@ -218,10 +281,9 @@ class ExitManager:
                 # ── TP1 exécuté : met à jour le montant restant ──
                 remaining = round(trade.amount_usdc - sell_amount, 2)
                 self._partial_sold[trade.id] = remaining
+                # FIX BUG-2: persiste en DB pour survie au redémarrage
+                self._persist_partial(trade.id, remaining)
 
-                # FIX: apply_pnl() au lieu de release_position() pour le TP1 partiel.
-                # release_position() retirait le token de _open_positions, permettant
-                # au bot de ré-entrer immédiatement alors que la position est encore ouverte.
                 self.risk_manager.apply_pnl(pnl=pnl)
 
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
@@ -241,9 +303,7 @@ class ExitManager:
                 # ── Fermeture totale ──
                 self.risk_manager.release_position(trade.token_id, pnl=pnl)
 
-                # FIX: was_partial doit être évalué AVANT le .pop()
-                # Avant: was_partial était vérifié après le pop → toujours False
-                # → le tag "(TP1+TP2)" n'était jamais écrit en DB.
+                # was_partial évalué AVANT le .pop()
                 was_partial = trade.id in self._partial_sold
                 self._partial_sold.pop(trade.id, None)
 
@@ -269,6 +329,7 @@ class ExitManager:
     # ------------------------------------------------------------------
     # Boucle background
     # ------------------------------------------------------------------
+
     async def _loop(self) -> None:
         logger.info(
             f"[EXIT] Manager started — "

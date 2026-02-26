@@ -5,6 +5,11 @@ Utilisé pour les signaux LLM et arbitrage.
 Formule Kelly: f* = (p * (b+1) - 1) / b
   où p = win_rate estimé, b = (1-price)/price
   On applique Quarter-Kelly (f* * 0.25) pour limiter la variance.
+
+FIX BUG-8: PositionSizer._capital est désormais synchronisé avec
+  RiskManager.portfolio.total_capital avant chaque calcul via sync_capital().
+  L'ancienne version gardait un capital figé depuis le démarrage, ce qui
+  sous-estimait ou surestimait le sizing au fil des gains/pertes.
 """
 from dataclasses import dataclass
 
@@ -13,10 +18,6 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
-# Capital initial par défaut : 10× le trade max (heuristique conservatrice).
-# FIX: si settings.initial_capital est défini, on l'utilise en priorité.
-# L'ancienne valeur max_trade_amount * 10 avec MAX_TRADE=10 donnait capital=100
-# → Kelly calculé sur une base 10× trop faible → tous les trades au minimum.
 _DEFAULT_CAPITAL = getattr(settings, "initial_capital", None) or settings.max_trade_amount * 10
 
 
@@ -36,8 +37,21 @@ class PositionSizer:
         self._capital = capital_usdc if capital_usdc > 0 else _DEFAULT_CAPITAL
 
     def update_capital(self, capital_usdc: float) -> None:
+        """Met à jour le capital de référence pour les prochains calculs."""
         if capital_usdc > 0:
             self._capital = capital_usdc
+
+    def sync_capital(self, risk_manager) -> None:
+        """
+        FIX BUG-8: synchronise le capital depuis RiskManager.portfolio.total_capital.
+        À appeler dans process_new_trade() avant chaque calculate().
+        """
+        try:
+            cap = risk_manager.portfolio.total_capital
+            if cap > 0:
+                self._capital = cap
+        except Exception:
+            pass
 
     def calculate(
         self,
@@ -72,12 +86,12 @@ class PositionSizer:
             ratio = final_amount / source_amount
             rationale = (
                 f"Kelly({conviction_score:.0%}) p={p:.2f} b={b:.2f} → "
-                f"${final_amount:.2f} (ratio {ratio:.2f}x source)"
+                f"${final_amount:.2f} (ratio {ratio:.2f}x source) capital=${self._capital:.0f}"
             )
         else:
             rationale = (
                 f"Kelly({conviction_score:.0%}) p={p:.2f} b={b:.2f} → "
-                f"${final_amount:.2f} ({pct:.1%} capital)"
+                f"${final_amount:.2f} ({pct:.1%} capital=${self._capital:.0f})"
             )
 
         logger.debug(f"[SIZER] {rationale}")

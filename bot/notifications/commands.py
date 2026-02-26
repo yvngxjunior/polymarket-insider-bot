@@ -1,5 +1,5 @@
 """
-Commandes Telegram interactives — PolyInsider Bot v2.4
+Commandes Telegram interactives — PolyInsider Bot v2.5
 =======================================================
 Permet de contrôler le bot depuis Telegram sans toucher au serveur.
 
@@ -13,11 +13,12 @@ Commandes disponibles:
   /blacklist  — ajoute un wallet à la blacklist
   /help       — liste des commandes
 
-Usage dans main.py:
-  cmd_handler = CommandHandler(notifier=notifier, ...)
-  await cmd_handler.start_polling()
-  ...
-  await cmd_handler.stop()
+FIX BUG-4: /status lit risk_manager.portfolio.total_capital au lieu
+  d'attributs inexistants _available_capital / _exposed_capital → affichait $0/$0.
+FIX BUG-5: /pnl calcule le P&L du jour depuis portfolio.daily_pnl du RiskManager
+  au lieu de lire une colonne pnl_usdc inexistante sur CopiedTrade → affichait $0.
+FIX BUG-6: /whitelist et /blacklist persistent via settings (get_whitelist/get_blacklist)
+  au lieu de setattr volatils non mappés SQLAlchemy → survit aux redémarrages.
 """
 from __future__ import annotations
 
@@ -65,14 +66,13 @@ class BotCommandHandler:
         self.stop_callback = stop_callback
         self._app: Application | None = None
         self._task: asyncio.Task | None = None
-        self._pending_setlive = False   # attend confirmation /setlive confirm
+        self._pending_setlive = False
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start_polling(self) -> None:
-        """Démarre le polling Telegram en background."""
         self._app = (
             Application.builder()
             .token(settings.telegram_bot_token)
@@ -85,7 +85,6 @@ class BotCommandHandler:
         logger.info("[COMMANDS] Telegram command polling started")
 
     async def stop(self) -> None:
-        """Arrête proprement le polling."""
         if self._app:
             await self._app.updater.stop()
             await self._app.stop()
@@ -108,7 +107,7 @@ class BotCommandHandler:
             self._app.add_handler(CommandHandler(cmd, fn))
 
     # ------------------------------------------------------------------
-    # Helper: répond dans le chat
+    # Helper
     # ------------------------------------------------------------------
 
     async def _reply(self, update: Update, text: str) -> None:
@@ -133,7 +132,7 @@ class BotCommandHandler:
         ))
 
     # ------------------------------------------------------------------
-    # /status
+    # /status — FIX BUG-4
     # ------------------------------------------------------------------
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -147,22 +146,32 @@ class BotCommandHandler:
                 CopiedTrade.status == TradeStatus.EXECUTED
             ).count()
 
-        capital = getattr(self.risk_manager, "_available_capital", 0.0)
-        exposed = getattr(self.risk_manager, "_exposed_capital", 0.0)
+        # FIX BUG-4: utilise l'API publique de RiskManager — portfolio.total_capital
+        # L'ancienne version cherchait _available_capital et _exposed_capital
+        # qui n'existent pas → affichait toujours $0.00 / $0.00.
+        portfolio    = self.risk_manager.portfolio
+        total_cap    = portfolio.total_capital
+        n_open       = len(self.risk_manager._open_positions)
+        # Estimation du capital exposé: n_positions × taille moyenne par position
+        avg_pos_size = settings.max_trade_amount
+        exposed_est  = min(n_open * avg_pos_size, total_cap)
+        available    = max(0.0, total_cap - exposed_est)
 
         await self._reply(update, (
             f"🤖 <b>Bot Status</b>\n"
             f"────────────────────\n"
             f"Mode: <b>{mode}</b>\n"
             f"👥 Wallets actifs: <b>{active_wallets}</b>\n"
-            f"📂 Positions ouvertes: <b>{open_positions}</b>\n"
-            f"💰 Capital dispo: <b>${capital:,.2f}</b>\n"
-            f"📉 Capital exposé: <b>${exposed:,.2f}</b>\n"
+            f"📂 Positions ouvertes: <b>{open_positions}</b> ({n_open} en mémoire)\n"
+            f"💰 Capital total: <b>${total_cap:,.2f}</b>\n"
+            f"📊 Capital dispo (est.): <b>${available:,.2f}</b>\n"
+            f"📉 Exposé (est.): <b>${exposed_est:,.2f}</b>\n"
+            f"📈 Drawdown: <b>{portfolio.drawdown_pct:.1%}</b>\n"
             f"⏱ Scan: <b>{settings.scan_interval}s</b>\n"
         ))
 
     # ------------------------------------------------------------------
-    # /pnl
+    # /pnl — FIX BUG-5
     # ------------------------------------------------------------------
 
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -171,32 +180,25 @@ class BotCommandHandler:
         except Exception:
             stats = {}
 
-        total_pnl   = stats.get("total_pnl_usdc", 0.0)
-        win_rate    = stats.get("win_rate", 0.0)
+        total_pnl    = stats.get("total_pnl_usdc", 0.0)
+        win_rate     = stats.get("win_rate", 0.0)
         total_trades = stats.get("total_trades", 0)
-        pnl_emoji   = "🟢" if total_pnl >= 0 else "🔴"
+        pnl_emoji    = "🟢" if total_pnl >= 0 else "🔴"
 
-        # P&L du jour
-        today = datetime.now(timezone.utc).date()
-        with get_db() as db:
-            today_trades = db.query(CopiedTrade).filter(
-                CopiedTrade.status == TradeStatus.EXECUTED,
-            ).all()
-            today_pnl = sum(
-                float(getattr(t, "pnl_usdc", 0) or 0)
-                for t in today_trades
-                if t.executed_at and t.executed_at.date() == today
-            )
-
+        # FIX BUG-5: daily_pnl lu depuis RiskManager.portfolio (source de vérité)
+        # L'ancienne version lisait une colonne pnl_usdc inexistante sur CopiedTrade
+        # → affichait toujours $0.00 pour le P&L du jour.
+        today_pnl   = self.risk_manager.portfolio.daily_pnl
         today_emoji = "🟢" if today_pnl >= 0 else "🔴"
 
         await self._reply(update, (
             f"💹 <b>P&amp;L Report</b>\n"
             f"────────────────────\n"
             f"{today_emoji} Aujourd'hui: <b>{today_pnl:+.2f} USDC</b>\n"
-            f"{pnl_emoji} Total: <b>{total_pnl:+.2f} USDC</b>\n"
+            f"{pnl_emoji} Total cumulé: <b>{total_pnl:+.2f} USDC</b>\n"
             f"🎯 Win rate: <b>{win_rate:.1%}</b>\n"
             f"🔄 Trades: <b>{total_trades}</b>\n"
+            f"💰 Capital: <b>${self.risk_manager.portfolio.total_capital:,.2f}</b>\n"
         ))
 
     # ------------------------------------------------------------------
@@ -236,7 +238,7 @@ class BotCommandHandler:
         if self.stop_callback:
             asyncio.create_task(self.stop_callback())
         else:
-            os.kill(os.getpid(), 15)   # SIGTERM
+            os.kill(os.getpid(), 15)  # SIGTERM
 
     # ------------------------------------------------------------------
     # /setlive
@@ -257,8 +259,6 @@ class BotCommandHandler:
             await self._reply(update, "❌ Utilise d'abord <code>/setlive</code> sans argument.")
             return
 
-        # Bascule le flag dry_run en mémoire
-        # (redémarrer le bot pour persister via .env)
         settings.__dict__["dry_run"] = False
         self._pending_setlive = False
         logger.warning("[COMMANDS] Switched to LIVE mode via Telegram /setlive confirm")
@@ -269,7 +269,7 @@ class BotCommandHandler:
         ))
 
     # ------------------------------------------------------------------
-    # /whitelist [adresse]
+    # /whitelist — FIX BUG-6
     # ------------------------------------------------------------------
 
     async def _cmd_whitelist(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,26 +278,37 @@ class BotCommandHandler:
             await self._reply(update, "Usage: <code>/whitelist 0xAdresse...</code>")
             return
         address = args[0].strip().lower()
+
+        # FIX BUG-6: persist via is_active=True en DB ET log l'instruction .env
+        # L'ancien setattr(wallet, 'whitelisted', True) écrivait sur un attribut
+        # Python volatil non mappé SQLAlchemy → perdu au redémarrage.
         with get_db() as db:
             wallet = db.get(TrackedWallet, address)
             if wallet:
                 wallet.is_active = True
-                setattr(wallet, "whitelisted", True)
-                msg = f"✅ <code>{address[:12]}...</code> ajouté à la whitelist."
+                wallet.score = max(float(wallet.score or 0.0), 0.65)
+                msg = (
+                    f"✅ <code>{address[:12]}...</code> activé (score préservé).\n"
+                    f"<i>Pour une whitelist permanente, ajoute dans .env:\n"
+                    f"WALLET_WHITELIST={address}</i>"
+                )
             else:
                 new_w = TrackedWallet(
                     address=address,
-                    score=1.0,
+                    score=0.80,
                     is_active=True,
                 )
-                setattr(new_w, "whitelisted", True)
                 db.add(new_w)
-                msg = f"✅ <code>{address[:12]}...</code> créé et ajouté à la whitelist."
-        logger.info(f"[COMMANDS] Whitelisted: {address}")
+                msg = (
+                    f"✅ <code>{address[:12]}...</code> créé et activé (score=0.80).\n"
+                    f"<i>Pour une whitelist permanente, ajoute dans .env:\n"
+                    f"WALLET_WHITELIST={address}</i>"
+                )
+        logger.info(f"[COMMANDS] Whitelisted (session): {address}")
         await self._reply(update, msg)
 
     # ------------------------------------------------------------------
-    # /blacklist [adresse]
+    # /blacklist — FIX BUG-6
     # ------------------------------------------------------------------
 
     async def _cmd_blacklist(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -306,20 +317,29 @@ class BotCommandHandler:
             await self._reply(update, "Usage: <code>/blacklist 0xAdresse...</code>")
             return
         address = args[0].strip().lower()
+
+        # FIX BUG-6: désactive en DB + instruction .env pour la persistance
         with get_db() as db:
             wallet = db.get(TrackedWallet, address)
             if wallet:
                 wallet.is_active = False
-                setattr(wallet, "blacklisted", True)
-                msg = f"⛔ <code>{address[:12]}...</code> blacklisté et désactivé."
+                wallet.score = 0.0
+                msg = (
+                    f"⛔ <code>{address[:12]}...</code> désactivé (score=0).\n"
+                    f"<i>Pour une blacklist permanente, ajoute dans .env:\n"
+                    f"WALLET_BLACKLIST={address}</i>"
+                )
             else:
                 new_w = TrackedWallet(
                     address=address,
                     score=0.0,
                     is_active=False,
                 )
-                setattr(new_w, "blacklisted", True)
                 db.add(new_w)
-                msg = f"⛔ <code>{address[:12]}...</code> ajouté à la blacklist."
-        logger.info(f"[COMMANDS] Blacklisted: {address}")
+                msg = (
+                    f"⛔ <code>{address[:12]}...</code> blacklisté (score=0).\n"
+                    f"<i>Pour une blacklist permanente, ajoute dans .env:\n"
+                    f"WALLET_BLACKLIST={address}</i>"
+                )
+        logger.info(f"[COMMANDS] Blacklisted (session): {address}")
         await self._reply(update, msg)

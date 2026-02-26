@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.5
+PolyInsider Bot v2.6
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -13,16 +13,18 @@ Architecture 7 phases + 3 background tasks:
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
 
-v2.5 fixes:
-  - FIX #1  RiskManager.capital persisté en DB (PortfolioSnapshot)
-  - FIX #2  open_positions persistées en DB — survit aux redémarrages
-  - FIX #3  ConvictionFilter._market_copies borné — anti-leak mémoire
-  - FIX #4  WalletScanner injecté dans WalletRefresher depuis run()
-  - FIX #5  Poids scoring renormalisés correctement avec/sans market_id
-  - FIX #6  (même correction que #1 — capital reflect solde réel)
-  - FIX #7  consecutive_losses remis à 0 dès premier win en refresh
-  - FIX #8  rate-limit chargé depuis copied_trades DB au démarrage
-  - FIX #9  WalletPerformance alimentée à chaque trade exécuté
+v2.6 fixes:
+  - FIX BUG-1  PositionManager ne touche plus au RiskManager (ExitManager = source unique)
+  - FIX BUG-2  _partial_sold persisté en DB → survit aux redémarrages
+  - FIX BUG-3  ConvergenceDetector._recent_trades nettoyé périodiquement (anti-leak)
+  - FIX BUG-4  /status lit risk_manager.portfolio (plus d'attributs inexistants)
+  - FIX BUG-5  /pnl lit daily_pnl depuis RiskManager.portfolio (plus de colonne fantôme)
+  - FIX BUG-6  /whitelist /blacklist persist via DB score/is_active + instruction .env
+  - FIX BUG-7  PositionManager.start_monitoring() désactivé (évite double-fermeture)
+  - FIX BUG-8  sizer.sync_capital(risk_manager) appelé avant chaque calculate()
+  - FIX BUG-9  get_top_traders() retry par page, pas sur la boucle entière
+  - FIX M2    convergence confidence: score non divisé par 100 (était déjà dans [0,1])
+  - FIX M3    exit_manager filtre CLOSED% pour éviter re-fermetures inutiles
 """
 import asyncio
 import signal
@@ -140,13 +142,15 @@ async def process_new_trade(
         logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
         return
 
-    if position_manager._positions.get(token_id):
+    if position_manager.is_open(token_id):
         logger.debug(f"[POS] Already open: {token_id[:8]}")
         return
 
     market_info = await client.get_market_info(condition_id) if condition_id else None
     question    = market_info.get("question", "") if market_info else ""
 
+    # FIX BUG-8: synchronise le capital avant chaque calcul de sizing
+    sizer.sync_capital(risk_manager)
     size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
 
@@ -213,8 +217,6 @@ async def main_loop(
             health_monitor.record_activity()
 
             # Phase 1 — Whale scan
-            # FIX: event["title"] = source de vérité (déjà filtré par WhaleTracker)
-            # On n'appelle plus get_market_info() ici — cause du bug Joe Biden
             for event in await whale_tracker.scan():
                 await notifier.notify_whale_event(
                     wallet=event["wallet"],
@@ -337,7 +339,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.5")
+    logger.info("  PolyInsider Bot v2.6")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -348,6 +350,7 @@ async def run() -> None:
     logger.info("  Telegram commands:        ON 📱")
     logger.info("  Health monitor:           ON 🟩")
     logger.info("  Capital persistence:      ON 💾")
+    logger.info("  Sizer capital sync:       ON 🔄")
     if settings.wallet_whitelist:
         logger.info(f"  Whitelist: {len(settings.get_whitelist())} wallets")
     if settings.wallet_blacklist:
@@ -391,9 +394,6 @@ async def run() -> None:
         performance_tracker=performance_tracker,
     )
 
-    # FIX #4 — WalletScanner injecté explicitement dans WalletRefresher
-    # L'ancienne version ne passait pas wallet_scanner → discovery jamais exécutée
-    # → 0 qualified wallets permanent après 60min.
     wallet_scanner = WalletScanner(
         client=client,
         insider_scanner=scanner,
@@ -402,7 +402,7 @@ async def run() -> None:
         scanner=scanner,
         notifier=notifier,
         interval_minutes=60,
-        wallet_scanner=wallet_scanner,   # FIX #4
+        wallet_scanner=wallet_scanner,
     )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
