@@ -64,15 +64,20 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Installer dépendances
-pip install fastapi uvicorn pydantic pydantic-settings
+pip install -r requirements.txt
 
-# Lancer le serveur
-python main.py
+# Lancer le serveur (option 1 - recommandée)
+python run.py
+
+# Ou (option 2 - CLI uvicorn)
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 L'API sera disponible sur **http://localhost:8000**
 
 ✅ Test : http://localhost:8000 devrait afficher `{"message": "PolyInsider Bot API v2.0"}`
+
+**⚠️ Important** : Toujours utiliser le **format import string** (`backend.main:app`) pour activer le reload automatique.
 
 ---
 
@@ -203,19 +208,20 @@ curl -X PUT http://localhost:8000/api/settings \
 ```
 polymarket-insider-bot/
 ├── backend/
-│   ├── main.py                 # FastAPI app
+│   ├── run.py                 # Launcher with reload
+│   ├── main.py                # FastAPI app
 │   └── app/
 │       └── routers/
-│           └── settings.py     # Settings API
+│           └── settings.py    # Settings API
 ├── frontend/
 │   └── src/
 │       └── app/
 │           └── settings/
-│               └── page.tsx    # Settings UI
+│               └── page.tsx   # Settings UI
 ├── bot/
-│   └── config.py               # Pydantic settings
-├── .env                        # Configuration
-└── DASHBOARD.md                # This file
+│   └── config.py              # Pydantic settings
+├── .env                       # Configuration
+└── DASHBOARD.md               # This file
 ```
 
 ---
@@ -236,6 +242,19 @@ polymarket-insider-bot/
 ---
 
 ## 🐛 Troubleshooting
+
+### **Backend : WARNING about import string**
+```bash
+# ❌ Ne PAS utiliser
+python main.py
+
+# ✅ Utiliser
+python run.py
+# OU
+uvicorn backend.main:app --reload
+```
+
+**Explication** : Uvicorn a besoin du format import string (`module:app`) pour activer le reload.
 
 ### **Backend ne démarre pas**
 ```bash
@@ -261,6 +280,7 @@ curl http://localhost:8000/health
 ```
 
 ### **Changes not applied after save**
+
 ⚠️ **Redémarrer le bot** ! Les settings sont lues au démarrage depuis `.env`
 
 ---
