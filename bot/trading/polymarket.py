@@ -13,7 +13,11 @@ class PolymarketDataClient:
     Client HTTP async pour les APIs publiques Polymarket.
     - Data API : trades, positions, activité, leaderboard  (data-api.polymarket.com)
     - Gamma API: métadonnées des marchés               (gamma-api.polymarket.com)
-    Aucun endpoint nécessite d'auth pour la lecture publique.
+    Aucun endpoint ne nécessite d'auth pour la lecture publique.
+
+    Champs réels de /trades (cf. docs Polymarket) :
+      proxyWallet, side, asset, conditionId, size, price,
+      timestamp, title, transactionHash, outcome
     """
 
     def __init__(self):
@@ -39,7 +43,7 @@ class PolymarketDataClient:
         limit: int = 100,
         offset: int = 0
     ) -> list[dict]:
-        """Récupère l'historique des trades d'un wallet (param user requis)."""
+        """Récupère l'historique des trades d'un wallet."""
         try:
             resp = await self._data_client.get(
                 "/activity",
@@ -61,13 +65,23 @@ class PolymarketDataClient:
         limit: int = 100
     ) -> list[dict]:
         """
-        Récupère les gros trades récents via Data API /trades (public, sans auth).
-        Cf. https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
+        Récupère les gros trades récents via Data API /trades.
+        - Trié par timestamp DESC (plus récent en premier) — garanti par l'API.
+        - Filtre CASH côté serveur (filterType + filterAmount) pour n'obtenir
+          que les trades >= min_amount USDC sans post-filtrage client.
+        - takerOnly=false pour capturer maker ET taker.
+
+        Champ wallet réel : proxyWallet (pas 'maker').
         """
         try:
             resp = await self._data_client.get(
                 "/trades",
-                params={"limit": limit}
+                params={
+                    "limit":        limit,
+                    "takerOnly":    "false",
+                    "filterType":   "CASH",
+                    "filterAmount": int(min_amount),
+                }
             )
             resp.raise_for_status()
             data = resp.json()
@@ -75,16 +89,17 @@ class PolymarketDataClient:
             result = []
             for t in trades:
                 size = float(t.get("size", t.get("usdcSize", 0)))
-                if size < min_amount:
-                    continue
+                wallet = t.get("proxyWallet", t.get("maker", ""))
                 result.append({
-                    "transactionHash": t.get("transactionHash", t.get("transaction_hash", t.get("id", ""))),
-                    "maker":           t.get("maker", t.get("maker_address", "")),
+                    "transactionHash": t.get("transactionHash", ""),
+                    "maker":           wallet,       # normalisé : toujours 'maker' en interne
                     "usdcSize":        size,
-                    "conditionId":     t.get("conditionId", t.get("condition_id", t.get("market", ""))),
-                    "asset":           t.get("asset", t.get("asset_id", t.get("token_id", ""))),
+                    "conditionId":     t.get("conditionId", ""),
+                    "asset":           t.get("asset", ""),
                     "side":            t.get("side", "BUY"),
                     "price":           float(t.get("price", 0)),
+                    "timestamp":       int(t.get("timestamp", 0)),
+                    "title":           t.get("title", ""),
                 })
             return result
         except Exception as e:
@@ -135,8 +150,8 @@ class PolymarketDataClient:
         limit: int = 150
     ) -> list[dict]:
         """
-        Récupère les meilleurs traders via /v1/leaderboard (Data API, public).
-        Max 50 par page — pagination par offset jusqu'à `limit` résultats.
+        Récupère les meilleurs traders via /v1/leaderboard.
+        Max 50 par page — pagination par offset.
         """
         results: list[dict] = []
         page_size = 50
