@@ -57,27 +57,30 @@ Toutes les fonctionnalités du bot sont configurables via des **toggles, sliders
 ### 1️⃣ **Backend API** (FastAPI)
 
 ```bash
-cd backend
+# IMPORTANT : Toujours lancer depuis la RACINE du projet
+cd polymarket-insider-bot
 
-# Créer environnement virtuel
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+# Créer environnement virtuel (si pas déjà fait)
+python -m venv .venv
 
-# Installer dépendances
-pip install -r requirements.txt
+# Activer environnement
+.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # Linux/Mac
 
-# Lancer le serveur (option 1 - recommandée)
-python run.py
+# Installer dépendances backend
+pip install -r backend/requirements.txt
 
-# Ou (option 2 - CLI uvicorn)
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+# Lancer le serveur
+python backend/run.py
 ```
 
 L'API sera disponible sur **http://localhost:8000**
 
 ✅ Test : http://localhost:8000 devrait afficher `{"message": "PolyInsider Bot API v2.0"}`
 
-**⚠️ Important** : Toujours utiliser le **format import string** (`backend.main:app`) pour activer le reload automatique.
+**⚠️ Important - Windows** : 
+- Le script `run.py` change automatiquement vers la racine si lancé depuis `backend/`
+- Le module `backend` doit être importable (fichier `__init__.py` présent)
 
 ---
 
@@ -123,12 +126,12 @@ Les commentaires et l'ordre du fichier sont **préservés**.
 Voici **toutes les variables configurables** via le dashboard :
 
 ```env
-# ── Core ──────────────────────────────────────
+# ── Core ────────────────────────────────────────────
 DRY_RUN=true                    # Simulation mode
 SCAN_INTERVAL=3                 # Scan frequency (seconds)
 INITIAL_CAPITAL=500.0          # Starting capital (USDC)
 
-# ── Risk Management ───────────────────────────
+# ── Risk Management ─────────────────────────────────
 MAX_POSITIONS=10                # Max concurrent positions
 MAX_POSITION_PCT=0.10          # Max 10% capital per position
 MAX_PRICE=0.90                 # Don't buy above 0.90
@@ -138,7 +141,7 @@ DRAWDOWN_LIMIT_PCT=0.25        # Pause after 25% drawdown
 KELLY_FRACTION=0.25            # Quarter-Kelly sizing
 CONVERGENCE_BOOST=1.5          # 1.5x boost on convergence
 
-# ── Conviction Filters ────────────────────────
+# ── Conviction Filters ──────────────────────────────
 MIN_WIN_RATE=0.70              # Min 70% win rate
 MIN_TRADES_COUNT=15            # Min 15 historical trades
 MIN_SOURCE_BET_USDC=50.0       # Min $50 source bet
@@ -146,7 +149,7 @@ MIN_WALLET_SCORE=0.65          # Min 65% quality score
 MAX_CONSECUTIVE_LOSSES=3       # Skip after 3 losses
 WHALE_THRESHOLD=500.0          # Whale alert at $500+
 
-# ── Features ──────────────────────────────────
+# ── Features ────────────────────────────────────────
 ARB_ENABLED=true               # Arbitrage scanner ON/OFF
 ARB_MIN_PROFIT_PCT=0.03        # Min 3% profit for arb
 MARKET_SCAN_ENABLED=true       # Market scanner ON/OFF
@@ -154,7 +157,7 @@ MARKET_SCAN_MAX_MARKETS=5000   # Scan up to 5k markets
 LLM_ENABLED=false              # AI agent ON/OFF
 LLM_MIN_CONFIDENCE=0.75        # Min 75% AI confidence
 
-# ── Advanced ──────────────────────────────────
+# ── Advanced ────────────────────────────────────────
 MIN_TRADE_USDC=2.0             # Min $2 per trade
 KELLY_FRACTION_SIZER=0.25      # Sizer Kelly fraction
 LOG_LEVEL=INFO                 # DEBUG/INFO/WARNING/ERROR
@@ -199,6 +202,12 @@ curl -X PUT http://localhost:8000/api/settings \
   -d '{"dry_run": false, "max_positions": 20}'
 ```
 
+### **GET /api/portfolio**
+Statistiques du portefeuille (capital, PnL, win rate)
+
+### **GET /api/positions**
+Liste des positions ouvertes
+
 ⚠️ **Note** : Le bot doit être **redémarré** pour appliquer les changements.
 
 ---
@@ -208,11 +217,15 @@ curl -X PUT http://localhost:8000/api/settings \
 ```
 polymarket-insider-bot/
 ├── backend/
+│   ├── __init__.py            # Module init
 │   ├── run.py                 # Launcher with reload
 │   ├── main.py                # FastAPI app
 │   └── app/
+│       ├── __init__.py
 │       └── routers/
-│           └── settings.py    # Settings API
+│           ├── __init__.py
+│           ├── settings.py    # Settings API
+│           └── portfolio.py   # Portfolio API
 ├── frontend/
 │   └── src/
 │       └── app/
@@ -243,40 +256,64 @@ polymarket-insider-bot/
 
 ## 🐛 Troubleshooting
 
+### **ModuleNotFoundError: No module named 'backend'**
+
+```bash
+# ❌ Ne PAS lancer depuis backend/
+cd backend
+python run.py  # ERREUR sur Windows
+
+# ✅ Toujours lancer depuis la RACINE
+cd polymarket-insider-bot
+python backend/run.py  # OK
+```
+
+**Explication** : Le module `backend` doit être importable, ce qui nécessite d'être dans le répertoire parent.
+
 ### **Backend : WARNING about import string**
+
 ```bash
 # ❌ Ne PAS utiliser
 python main.py
 
 # ✅ Utiliser
-python run.py
+python backend/run.py
 # OU
 uvicorn backend.main:app --reload
 ```
 
-**Explication** : Uvicorn a besoin du format import string (`module:app`) pour activer le reload.
-
 ### **Backend ne démarre pas**
+
 ```bash
 # Vérifier que Python 3.11+ est installé
 python --version
 
 # Vérifier que les dépendances sont installées
 pip list | grep fastapi
+
+# Vérifier qu'on est à la racine
+pwd  # Linux/Mac
+cd   # Windows (devrait afficher ...\polymarket-insider-bot)
 ```
 
 ### **Frontend ne compile pas**
+
 ```bash
 # Supprimer node_modules et réinstaller
 rm -rf node_modules package-lock.json
 npm install
 ```
 
-### **API retourne 404 sur /api/settings**
+### **API retourne 404 sur /api/portfolio**
+
 ```bash
-# Vérifier que le backend tourne sur le bon port
+# Vérifier que le backend tourne et que portfolio.py est chargé
 curl http://localhost:8000/health
 # Devrait retourner {"status": "healthy"}
+
+# Vérifier les routes disponibles
+curl http://localhost:8000/
+# Devrait lister /api/portfolio et /api/positions
 ```
 
 ### **Changes not applied after save**
@@ -287,7 +324,7 @@ curl http://localhost:8000/health
 
 ## 📝 TODO (Futures features)
 
-- [ ] **Portfolio Stats** - Visualiser capital, PnL, positions ouvertes
+- [ ] **Portfolio Stats** - Visualiser capital, PnL, positions ouvertes ✅ (API done)
 - [ ] **Trade History** - Table des trades avec filtres
 - [ ] **Real-time Metrics** - WebSocket pour métriques live
 - [ ] **Whale Alerts** - Liste des dernières alertes whale
