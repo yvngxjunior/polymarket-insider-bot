@@ -1,7 +1,7 @@
 """
-PolyInsider Bot v2.3
+PolyInsider Bot v2.4
 =====================
-Architecture 7 phases + 2 background tasks:
+Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
@@ -11,11 +11,13 @@ Architecture 7 phases + 2 background tasks:
   7. Performance report — win rate / PnL / trades          [périodique]
   └ WalletRefresher    — refresh wallets insiders          [background, 60min]
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
+  └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
 
-v2.3:
-  - entry_timing_score passé au ConvictionFilter
-  - Liquidité dynamique dans MarketAnalyzer (trade_amount)
-  - Vente partielle TP1 (+20%/50%) + TP2 (+40%/100%) dans ExitManager
+v2.4 (Sprint 2):
+  - BotCommandHandler    : /status /pnl /positions /stop /setlive /whitelist /blacklist
+  - HealthMonitor        : alerte si aucun trade depuis X min (crash silencieux)
+  - Whitelist/Blacklist  : via .env (WALLET_WHITELIST, WALLET_BLACKLIST) + /whitelist /blacklist
+  - process_new_trade()  : skip immédiat si blacklist, bypass score si whitelist
 """
 import asyncio
 import signal
@@ -38,6 +40,8 @@ from bot.trading.sizing import PositionSizer
 from bot.trading.filters import ConvictionFilter
 from bot.trading.exit_manager import ExitManager
 from bot.notifications.telegram import TelegramNotifier
+from bot.notifications.commands import BotCommandHandler
+from bot.notifications.health import HealthMonitor
 from bot.analytics.performance import PerformanceTracker
 from bot.ai.llm_agent import LLMAgent
 from bot.utils.logger import logger
@@ -60,6 +64,7 @@ async def process_new_trade(
     performance_tracker: PerformanceTracker,
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
+    health_monitor: HealthMonitor,
 ) -> None:
     token_id     = trade.get("asset", "")
     price        = float(trade.get("price", 0))
@@ -70,14 +75,25 @@ async def process_new_trade(
     if not token_id or price <= 0 or amount <= 0:
         return
 
+    # Étape 0 — Blacklist check (skip immédiat)
+    blacklist = settings.get_blacklist()
+    if wallet_address.lower() in blacklist:
+        logger.debug(f"[BLACKLIST] Skipped {wallet_address[:10]}")
+        return
+
+    # Whitelist check (bypass filtres de score mais pas le risk manager)
+    whitelist = settings.get_whitelist()
+    is_whitelisted = wallet_address.lower() in whitelist
+    effective_score = 1.0 if is_whitelisted else wallet_score
+
     # Étape 1 — Filtre de conviction (losing streak + timing + bet + prix + wallet)
     f = conv_filter.evaluate(
         source_amount=amount,
         price=price,
-        wallet_score=wallet_score,
+        wallet_score=effective_score,
         market_id=condition_id,
         consecutive_losses=consecutive_losses,
-        entry_timing_score=entry_timing_score,   # ← NEW v2.3
+        entry_timing_score=entry_timing_score,
     )
     if not f.passed:
         return
@@ -85,7 +101,7 @@ async def process_new_trade(
     # Étape 2 — Risk check (Kelly sizing)
     decision = risk_manager.evaluate(
         token_id=token_id, price=price,
-        source_amount=amount, wallet_win_rate=wallet_score,
+        source_amount=amount, wallet_win_rate=effective_score,
     )
     if not decision.approved:
         logger.debug(f"[RISK] Skipped {token_id[:8]}: {decision.reason}")
@@ -115,6 +131,7 @@ async def process_new_trade(
     )
 
     if copied_trade:
+        health_monitor.record_trade()   # réinitialise le timer de silence
         try:
             await position_manager.register(copied_trade)
         except Exception:
@@ -142,6 +159,7 @@ async def main_loop(
     performance_tracker: PerformanceTracker,
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
+    health_monitor: HealthMonitor,
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
@@ -154,6 +172,7 @@ async def main_loop(
     while True:
         try:
             loop_count += 1
+            health_monitor.record_activity()   # ← ping le monitor à chaque cycle
 
             # Phase 1 — Whale scan
             for event in await whale_tracker.scan():
@@ -172,7 +191,6 @@ async def main_loop(
                 await notifier.notify_convergence(sig)
 
             # Phase 3 — Insider copy trading
-            # On charge address + score + consecutive_losses + entry_timing_score
             with get_db() as db:
                 wallets = (
                     db.query(TrackedWallet)
@@ -185,7 +203,7 @@ async def main_loop(
                         w.address,
                         float(w.score or 0.70),
                         int(getattr(w, "consecutive_losses", 0) or 0),
-                        float(getattr(w, "entry_timing_score", 0.5) or 0.5),  # ← NEW v2.3
+                        float(getattr(w, "entry_timing_score", 0.5) or 0.5),
                     )
                     for w in wallets
                 ]
@@ -209,11 +227,12 @@ async def main_loop(
                         wallet_address=addr,
                         wallet_score=score,
                         consecutive_losses=losses,
-                        entry_timing_score=timing,     # ← NEW v2.3
+                        entry_timing_score=timing,
                         engine=engine, notifier=notifier, client=client,
                         risk_manager=risk_manager, position_manager=position_manager,
                         performance_tracker=performance_tracker,
                         conv_filter=conv_filter, sizer=sizer,
+                        health_monitor=health_monitor,
                     )
 
             # Phase 4 — Arbitrage cross-platform
@@ -283,7 +302,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.3")
+    logger.info("  PolyInsider Bot v2.4")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -291,6 +310,12 @@ async def run() -> None:
     logger.info("  Losing streak protection: ON 🛡️")
     logger.info("  Entry timing filter:      ON ⏱️")
     logger.info("  Partial TP sell (50/50):  ON 💰")
+    logger.info("  Telegram commands:        ON 📱")
+    logger.info("  Health monitor:           ON 🟩")
+    if settings.wallet_whitelist:
+        logger.info(f"  Whitelist: {len(settings.get_whitelist())} wallets")
+    if settings.wallet_blacklist:
+        logger.info(f"  Blacklist: {len(settings.get_blacklist())} wallets")
     logger.info("=" * 62)
 
     init_db()
@@ -314,6 +339,17 @@ async def run() -> None:
         notifier=notifier,
         engine=engine,
     )
+    health_monitor = HealthMonitor(
+        notifier=notifier,
+        silence_threshold_min=settings.health_silence_threshold_min,
+        check_interval_sec=settings.health_check_interval_sec,
+        alert_cooldown_min=settings.health_alert_cooldown_min,
+    )
+    cmd_handler = BotCommandHandler(
+        notifier=notifier,
+        risk_manager=risk_manager,
+        performance_tracker=performance_tracker,
+    )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
@@ -330,6 +366,11 @@ async def run() -> None:
     refresher = WalletRefresher(scanner=scanner, notifier=notifier, interval_minutes=60)
     await refresher.start()
     await exit_manager.start()
+    await health_monitor.start()
+    try:
+        await cmd_handler.start_polling()
+    except Exception as e:
+        logger.warning(f"[COMMANDS] Could not start polling (token invalid?): {e}")
 
     main_task = asyncio.create_task(
         main_loop(
@@ -340,6 +381,7 @@ async def run() -> None:
             risk_manager=risk_manager, position_manager=position_manager,
             performance_tracker=performance_tracker,
             conv_filter=conv_filter, sizer=sizer,
+            health_monitor=health_monitor,
         )
     )
 
@@ -352,6 +394,8 @@ async def run() -> None:
 
     await asyncio.gather(
         exit_manager.stop(),
+        health_monitor.stop(),
+        cmd_handler.stop(),
         client.close(),
         arbitrage_scanner.close(),
         market_scanner.close(),
