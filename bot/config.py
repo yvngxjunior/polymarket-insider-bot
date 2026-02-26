@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,9 +24,15 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     telegram_chat_id: str
 
-    # ── Database ─────────────────────────────────────────────────────────
+    # ── Database ────────────────────────────────────────────────────────
     database_url: str
     redis_url: str = "redis://localhost:6379/0"
+
+    # ── Logging ────────────────────────────────────────────────────────
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO",
+        description="Niveau de log (DEBUG pour voir les réponses API brutes)",
+    )
 
     # ── Bot Core ────────────────────────────────────────────────────────
     scan_interval: int = Field(default=3, ge=1, le=60)
@@ -41,19 +47,19 @@ class Settings(BaseSettings):
     max_price: float = Field(default=0.90, ge=0.50, le=0.99)
     min_price: float = Field(default=0.05, ge=0.01, le=0.50)
 
-    # ── Conviction Filters (v2.0) ───────────────────────────────────────
+    # ── Conviction Filters (v2.0) ────────────────────────────────────────
     min_source_bet_usdc: float = Field(default=50.0, ge=1.0,
         description="Taille minimale du bet source pour être copié")
     min_wallet_score: float = Field(default=0.65, ge=0.0, le=1.0,
         description="Win rate minimum du wallet source")
 
-    # ── Arbitrage Cross-Platform (v2.0) ────────────────────────────────
+    # ── Arbitrage Cross-Platform (v2.0) ─────────────────────────────────
     arb_enabled: bool = Field(default=True,
         description="Active le scanner Polymarket vs Kalshi")
     arb_min_profit_pct: float = Field(default=0.03, ge=0.01, le=0.20,
         description="Profit minimum pour signaler une opportunité d'arb")
 
-    # ── Market Scanner (v2.0) ─────────────────────────────────────────
+    # ── Market Scanner (v2.0) ──────────────────────────────────────────
     market_scan_enabled: bool = Field(default=True,
         description="Active le scan haute échelle (10k+ marchés)")
     market_scan_max_markets: int = Field(default=5000, ge=100, le=20000,
@@ -61,7 +67,7 @@ class Settings(BaseSettings):
     market_scan_every_n_loops: int = Field(default=100,
         description="Fréquence du market scan (toutes les N boucles)")
 
-    # ── LLM Agent (v2.0) — optionnel ──────────────────────────────────
+    # ── LLM Agent (v2.0) — optionnel ─────────────────────────────────
     llm_enabled: bool = Field(default=False,
         description="Active l'agent GPT-4o-mini (nécessite OPENAI_API_KEY)")
     openai_api_key: Optional[str] = Field(default=None,
@@ -75,7 +81,7 @@ class Settings(BaseSettings):
     llm_top_markets: int = Field(default=5, ge=1, le=20,
         description="Nombre de marchés analysés par cycle LLM")
 
-    # ── Wallet Whitelist / Blacklist (v2.4) ─────────────────────────────
+    # ── Wallet Whitelist / Blacklist (v2.4) ───────────────────────────
     wallet_whitelist: str = Field(
         default="",
         description="CSV d'adresses toujours suivies (bypass filtres de score). Ex: 0xAAA,0xBBB",
@@ -85,7 +91,7 @@ class Settings(BaseSettings):
         description="CSV d'adresses jamais copiées. Ex: 0xCCC,0xDDD",
     )
 
-    # ── Health Monitor (v2.4) ─────────────────────────────────────────
+    # ── Health Monitor (v2.4) ───────────────────────────────────────
     health_silence_threshold_min: int = Field(
         default=30,
         description="Minutes sans activité avant alerte Telegram",
@@ -99,7 +105,7 @@ class Settings(BaseSettings):
         description="Minutes minimum entre deux alertes de santé (anti-spam)",
     )
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # ── Helpers ─────────────────────────────────────────────────────────
 
     def get_whitelist(self) -> set[str]:
         """Retourne la whitelist comme un set d'adresses en minuscules."""
