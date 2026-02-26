@@ -55,7 +55,11 @@ class Settings(BaseSettings):
     telegram_chat_id: str
 
     # ── Database ────────────────────────────────────────────────────────────────
-    database_url: str
+    # FIX BUG-1: Default to data/ directory (post-migration default)
+    database_url: str = Field(
+        default="sqlite:///./data/polyinsider.db",
+        description="Database URL (default: data/polyinsider.db after migration)",
+    )
     redis_url: str = "redis://localhost:6379/0"
 
     # ── Logging ────────────────────────────────────────────────────────────────
