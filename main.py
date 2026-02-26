@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.7
+PolyInsider Bot v2.8
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -14,31 +14,41 @@ Architecture 7 phases + 3 background tasks:
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
 
 v2.6 fixes:
-  - FIX BUG-1  PositionManager ne touche plus au RiskManager (ExitManager = source unique)
-  - FIX BUG-2  _partial_sold persisté en DB → survit aux redémarrages
-  - FIX BUG-3  ConvergenceDetector._recent_trades nettoyé périodiquement (anti-leak)
-  - FIX BUG-4  /status lit risk_manager.portfolio (plus d'attributs inexistants)
-  - FIX BUG-5  /pnl lit daily_pnl depuis RiskManager.portfolio (plus de colonne fantôme)
-  - FIX BUG-6  /whitelist /blacklist persist via DB score/is_active + instruction .env
-  - FIX BUG-7  PositionManager.start_monitoring() désactivé (évite double-fermeture)
-  - FIX BUG-8  sizer.sync_capital(risk_manager) appelé avant chaque calculate()
-  - FIX BUG-9  get_top_traders() retry par page, pas sur la boucle entière
-  - FIX M2    convergence confidence: score non divisé par 100 (était déjà dans [0,1])
-  - FIX M3    exit_manager filtre CLOSED% pour éviter re-fermetures inutiles
+  - FIX BUG-1  PositionManager ne touche plus au RiskManager
+  - FIX BUG-2  _partial_sold persisté en DB
+  - FIX BUG-3  ConvergenceDetector._recent_trades nettoyé périodiquement
+  - FIX BUG-4  /status lit risk_manager.portfolio
+  - FIX BUG-5  /pnl lit daily_pnl depuis RiskManager.portfolio
+  - FIX BUG-6  /whitelist /blacklist persist via DB
+  - FIX BUG-7  PositionManager.start_monitoring() désactivé
+  - FIX BUG-8  sizer.sync_capital(risk_manager) avant chaque calculate()
+  - FIX BUG-9  get_top_traders() retry par page
+  - FIX M2    convergence confidence non divisé par 100
+  - FIX M3    exit_manager filtre CLOSED%
 
 v2.7 fixes:
-  - FIX EXIT-1  exit_manager filtre unifié DRY_RUN+LIVE via ~LIKE 'CLOSED%'
+  - FIX EXIT-1  exit_manager filtre unifié DRY_RUN+LIVE
+  - FIX EXIT-2  _get_current_price utilise trade.side
+  - FIX EXIT-3  guard trade.id is None
+  - FIX ENGINE-6  slash manquant dans URL /book
+  - FIX ENGINE-7  close_position passait shares au lieu d'USDC
+  - FIX RISK-4  market_volume_usdc=0.0 par défaut
   - FIX INSIDER-1  _safe_float() + _known_trades dedup + Semaphore(20)
-  - FIX WHALE-1/2/3  deque FIFO + batch DB is_whale + _safe_float()
-  - FIX REFRESHER-1  _known_wallets chargé depuis DB au __init__ (anti-flood restart)
-  - FIX REFRESHER-2  discovery immédiat si DB vide au démarrage
-  - FIX PM-1  position_manager: rechargement DB au démarrage + fallback is_open()
-  - FIX CONV-1/2  timestamp ms→s + safe_float sur amount/price
-  - FIX ENGINE-4  appels CLOB sync wrappés dans run_in_executor
-  - FIX ENGINE-5  order book réel + slicing avant chaque BUY
-  - FIX MAIN-1  whale scan throttlé à toutes les 4 boucles (~12s)
-  - FIX SIZER-1  TIERED_MULTIPLIERS dégressifs configurable via .env
-  - FEAT SIZER-2  /setcapital hot-reload sizer (sizer injecté dans BotCommandHandler)
+  - FIX WHALE-1/2/3  deque FIFO + batch DB + _safe_float()
+  - FIX REFRESHER-1/2  _known_wallets chargé depuis DB + discovery immédiat
+  - FIX PM-1  rechargement DB au démarrage
+  - FIX CONV-1/2  timestamp ms→s + safe_float
+  - FIX ENGINE-4/5  run_in_executor + order book réel
+  - FIX MAIN-1  whale scan throttlé toutes les 4 boucles
+  - FIX SIZER-1  TIERED_MULTIPLIERS via .env
+  - FEAT SIZER-2  /setcapital hot-reload
+
+v2.8 fixes:
+  - FIX MAIN-2   float(None) crash dans process_new_trade → _safe_float()
+  - FIX MAIN-3   refresher.stop() absent du shutdown → ajout dans gather()
+  - FIX CMD-1    settings mutation Pydantic v2 → object.__setattr__()
+  - FIX INSIDER-4 get_new_trades() sans timeout → asyncio.wait_for 6s/wallet
+  - IMPROV-8     process_new_trade envelopé dans try/except non bloquant
 """
 import asyncio
 import signal
@@ -49,7 +59,7 @@ import aiohttp
 from bot.config import get_settings
 from bot.database import get_db, TrackedWallet, init_db
 from bot.trading.polymarket import PolymarketDataClient
-from bot.scanner.insider import InsiderScanner
+from bot.scanner.insider import InsiderScanner, _safe_float
 from bot.scanner.whale import WhaleTracker
 from bot.scanner.wallet_refresher import WalletRefresher
 from bot.scanner.wallet_scanner import WalletScanner
@@ -91,11 +101,13 @@ async def process_new_trade(
     convergence_detector: ConvergenceDetector,
 ) -> None:
     token_id     = trade.get("asset", "")
-    price        = float(trade.get("price", 0))
-    amount       = float(trade.get("usdcSize", 0))
+    # FIX MAIN-2: _safe_float() au lieu de float() direct
+    # float(None) -> TypeError non catchée quand l'API retourne null
+    price        = _safe_float(trade.get("price"), 0.0)
+    amount       = _safe_float(trade.get("usdcSize"), 0.0)
     side         = trade.get("side", "BUY").upper()
     condition_id = trade.get("conditionId", "")
-    timestamp    = float(trade.get("timestamp", 0) or 0)
+    timestamp    = _safe_float(trade.get("timestamp"), 0.0)
 
     if not token_id or price <= 0 or amount <= 0:
         return
@@ -265,28 +277,46 @@ async def main_loop(
                 await asyncio.sleep(settings.scan_interval)
                 continue
 
+            # FIX INSIDER-4: chaque get_new_trades est limité à 6s
+            # pour éviter de bloquer tout le gather si un wallet est lent.
+            async def _safe_get_trades(addr: str) -> list:
+                try:
+                    return await asyncio.wait_for(
+                        scanner.get_new_trades(addr), timeout=6.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(f"[SCAN] Timeout for {addr[:10]}...")
+                    return []
+                except Exception as e:
+                    logger.warning(f"[SCAN] Error {addr[:10]}: {e}")
+                    return []
+
             all_trades = await asyncio.gather(
-                *[scanner.get_new_trades(addr) for addr, _, _, _ in wallet_data],
-                return_exceptions=True,
+                *[_safe_get_trades(addr) for addr, _, _, _ in wallet_data],
             )
             for (addr, score, losses, timing), trades in zip(wallet_data, all_trades):
-                if isinstance(trades, Exception):
-                    logger.warning(f"Scan error {addr[:8]}: {trades}")
-                    continue
                 for trade in trades:
-                    await process_new_trade(
-                        trade=trade,
-                        wallet_address=addr,
-                        wallet_score=score,
-                        consecutive_losses=losses,
-                        entry_timing_score=timing,
-                        engine=engine, notifier=notifier, client=client,
-                        risk_manager=risk_manager, position_manager=position_manager,
-                        performance_tracker=performance_tracker,
-                        conv_filter=conv_filter, sizer=sizer,
-                        health_monitor=health_monitor,
-                        convergence_detector=convergence_detector,
-                    )
+                    # IMPROV-8: enveloppe non bloquante — une exception sur un
+                    # trade n'arrête pas le traitement des trades suivants.
+                    try:
+                        await process_new_trade(
+                            trade=trade,
+                            wallet_address=addr,
+                            wallet_score=score,
+                            consecutive_losses=losses,
+                            entry_timing_score=timing,
+                            engine=engine, notifier=notifier, client=client,
+                            risk_manager=risk_manager, position_manager=position_manager,
+                            performance_tracker=performance_tracker,
+                            conv_filter=conv_filter, sizer=sizer,
+                            health_monitor=health_monitor,
+                            convergence_detector=convergence_detector,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[MAIN] process_new_trade error "
+                            f"({addr[:10]} {trade.get('asset', '?')[:12]}): {e}"
+                        )
 
             # Phase 4 — Arbitrage cross-platform
             if loop_count % ARB_EVERY == 0:
@@ -355,7 +385,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.7")
+    logger.info("  PolyInsider Bot v2.8")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -367,7 +397,6 @@ async def run() -> None:
     logger.info("  Health monitor:           ON 🟩")
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
-    # FEAT SIZER-2: log tiered multipliers au démarrage
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -409,7 +438,6 @@ async def run() -> None:
         check_interval_sec=settings.health_check_interval_sec,
         alert_cooldown_min=settings.health_alert_cooldown_min,
     )
-    # FEAT SIZER-2: sizer injecté → /setcapital hot-reload sans redémarrage
     cmd_handler = BotCommandHandler(
         notifier=notifier,
         risk_manager=risk_manager,
@@ -469,7 +497,10 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
 
+    # FIX MAIN-3: refresher.stop() ajouté — était absent, la tâche
+    # background WalletRefresher restait zombie à l'arrêt du bot.
     await asyncio.gather(
+        refresher.stop(),
         exit_manager.stop(),
         health_monitor.stop(),
         cmd_handler.stop(),
