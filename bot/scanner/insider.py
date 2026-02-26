@@ -69,6 +69,7 @@ class InsiderScanner:
     FIX INSIDER-1 -- _safe_float() evite TypeError sur usdcSize/tradeSize null.
     FIX INSIDER-2 -- _known_trades n'indexe plus les id vides ('').
     FIX INSIDER-3 -- refresh_tracked_wallets() limite la concurrence (Semaphore 20).
+    FIX BUG-2     -- Add debug logs + case-insensitive type check for BUY.
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -172,15 +173,37 @@ class InsiderScanner:
         )
 
     async def get_new_trades(self, wallet_address: str) -> list[dict]:
+        """
+        FIX BUG-2: Debug logs + case-insensitive type check.
+        Returns only NEW BUY trades from wallet_address.
+        """
         trades = await self.client.get_wallet_trades(wallet_address, limit=20)
         known  = self._known_trades.get(wallet_address, set())
         new_trades = []
+        
         for trade in trades:
             trade_id = trade.get("id", "")
+            trade_type = (trade.get("type") or "").upper()  # Case-insensitive
+            
+            # FIX BUG-2: Log pour debug
             if trade_id and trade_id not in known:
-                if trade.get("type", "").upper() == "BUY":
+                logger.debug(
+                    f"[SCAN] {wallet_address[:10]} new trade detected: "
+                    f"type={trade_type} id={trade_id[:12]}... "
+                    f"amount=${_safe_float(trade.get('usdcSize')):.2f}"
+                )
+            
+            if trade_id and trade_id not in known:
+                if trade_type == "BUY":  # Case-insensitive check
                     new_trades.append(trade)
+                    logger.info(
+                        f"[NEW TRADE] {wallet_address[:10]}... BUY "
+                        f"${_safe_float(trade.get('usdcSize')):.2f} "
+                        f"@ {_safe_float(trade.get('price')):.3f} "
+                        f"on {trade.get('asset', '?')[:16]}..."
+                    )
                 known.add(trade_id)
+        
         self._known_trades[wallet_address] = known
         return new_trades
 
