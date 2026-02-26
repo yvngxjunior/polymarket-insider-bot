@@ -18,10 +18,12 @@ La séparation refresh/discovery est importante:
   - discovery: lent, 200+ candidats, moins fréquent (tous les 3h par défaut)
 
 FIX REFRESHER-1 — _known_wallets chargé depuis DB au __init__.
-  Avant: set() vide → flood Telegram au premier refresh post-restart
-  (tous les wallets actifs traités comme 'nouveaux').
-  Après: _load_known_wallets() charge les adresses is_active=True en DB
-  avant le premier refresh.
+  Avant: set() vide → flood Telegram au premier refresh post-restart.
+  Après: _load_known_wallets() charge les adresses is_active=True en DB.
+
+FIX REFRESHER-2 — Discovery immédiat si DB vide au démarrage.
+  Avant: avec DB vide, discovery attendait le cycle 3 (3h).
+  Après: si Refresh #1 trouve 0 wallets actifs, discovery est lancé immédiatement.
 """
 from __future__ import annotations
 
@@ -63,7 +65,6 @@ class WalletRefresher:
         self._stop_event = asyncio.Event()
 
         # FIX REFRESHER-1: charge les wallets connus depuis la DB au demarrage
-        # pour eviter le flood Telegram au premier refresh post-restart.
         self._known_wallets: set[str] = self._load_known_wallets()
 
     # ------------------------------------------------------------------
@@ -73,7 +74,6 @@ class WalletRefresher:
     def _load_known_wallets(self) -> set[str]:
         """
         Charge les adresses de tous les wallets actifs depuis TrackedWallet.
-        Appelé une seule fois au __init__ avant le premier refresh.
         Retourne un set vide en cas d'erreur DB (premier run, table absente).
         """
         try:
@@ -93,6 +93,18 @@ class WalletRefresher:
         except Exception as e:
             logger.warning(f"[REFRESHER] Could not load known wallets from DB: {e}")
             return set()
+
+    def _count_active_wallets(self) -> int:
+        """Retourne le nombre de wallets actifs en DB."""
+        try:
+            with get_db() as db:
+                return (
+                    db.query(TrackedWallet)
+                    .filter(TrackedWallet.is_active == True)  # noqa: E712
+                    .count()
+                )
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -124,8 +136,16 @@ class WalletRefresher:
 
     async def _loop(self) -> None:
         """Boucle infinie: refresh + discovery selon le ratio."""
-        # Premier run immédiat au démarrage
         await self._run_refresh()
+
+        # FIX REFRESHER-2: si DB vide apres le premier refresh,
+        # on lance immediatement un discovery plutot d'attendre 3h.
+        if self._count_active_wallets() == 0:
+            logger.info(
+                "[REFRESHER] DB empty after Refresh #1 — "
+                "launching immediate discovery..."
+            )
+            await self._run_discovery()
 
         while not self._stop_event.is_set():
             try:
@@ -149,18 +169,11 @@ class WalletRefresher:
     # ------------------------------------------------------------------
 
     async def _run_refresh(self) -> None:
-        """
-        Refresh complet:
-        - Recalcule win_rate, score, consecutive_losses
-        - Met à jour la DB (champ consecutive_losses inclus)
-        - Alerte pour les nouveaux wallets détectés
-        """
         self._refresh_count += 1
         logger.info(f"[REFRESHER] Refresh #{self._refresh_count} starting...")
 
         try:
             analyses = await self.scanner.refresh_tracked_wallets()
-
             await self._sync_consecutive_losses(analyses)
 
             new_count = 0
@@ -187,11 +200,6 @@ class WalletRefresher:
             logger.error(f"[REFRESHER] Refresh error: {e}")
 
     async def _sync_consecutive_losses(self, analyses) -> None:
-        """
-        Met à jour le champ consecutive_losses de chaque TrackedWallet en DB.
-        Ce champ est lu par process_new_trade() dans main.py pour la protection
-        contre les séries de pertes (losing streak).
-        """
         try:
             with get_db() as db:
                 for analysis in analyses:
