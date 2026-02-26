@@ -16,6 +16,12 @@ Effectue deux opérations distinctes:
 La séparation refresh/discovery est importante:
   - refresh: rapide, wallets connus, mis à jour fréquemment (60 min)
   - discovery: lent, 200+ candidats, moins fréquent (tous les 3h par défaut)
+
+FIX REFRESHER-1 — _known_wallets chargé depuis DB au __init__.
+  Avant: set() vide → flood Telegram au premier refresh post-restart
+  (tous les wallets actifs traités comme 'nouveaux').
+  Après: _load_known_wallets() charge les adresses is_active=True en DB
+  avant le premier refresh.
 """
 from __future__ import annotations
 
@@ -45,17 +51,48 @@ class WalletRefresher:
         notifier: TelegramNotifier,
         interval_minutes: int = 60,
         discovery_ratio: int = 3,
-        wallet_scanner=None,   # WalletScanner | None — injecté ou créé lazy
+        wallet_scanner=None,
     ) -> None:
         self.scanner = scanner
         self.notifier = notifier
         self.interval_minutes = interval_minutes
         self.discovery_ratio = discovery_ratio
         self._wallet_scanner = wallet_scanner
-        self._known_wallets: set[str] = set()
         self._refresh_count: int = 0
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+
+        # FIX REFRESHER-1: charge les wallets connus depuis la DB au demarrage
+        # pour eviter le flood Telegram au premier refresh post-restart.
+        self._known_wallets: set[str] = self._load_known_wallets()
+
+    # ------------------------------------------------------------------
+    # FIX REFRESHER-1 — Chargement initial depuis DB
+    # ------------------------------------------------------------------
+
+    def _load_known_wallets(self) -> set[str]:
+        """
+        Charge les adresses de tous les wallets actifs depuis TrackedWallet.
+        Appelé une seule fois au __init__ avant le premier refresh.
+        Retourne un set vide en cas d'erreur DB (premier run, table absente).
+        """
+        try:
+            with get_db() as db:
+                addresses = {
+                    row.address
+                    for row in db.query(TrackedWallet.address)
+                    .filter(TrackedWallet.is_active == True)  # noqa: E712
+                    .all()
+                }
+            if addresses:
+                logger.info(
+                    f"[REFRESHER] Loaded {len(addresses)} known wallet(s) from DB "
+                    f"(anti-flood restart protection)"
+                )
+            return addresses
+        except Exception as e:
+            logger.warning(f"[REFRESHER] Could not load known wallets from DB: {e}")
+            return set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -104,10 +141,6 @@ class WalletRefresher:
 
             await self._run_refresh()
 
-            # FIX: discovery ne se déclenche pas au cycle 0 (refresh_count == 0
-            # après le premier refresh immédiat car on incrémente dans _run_refresh).
-            # Avant: 0 % 3 == 0 → discovery se lançait immédiatement au 1er cycle
-            # après le refresh initial, avant que les wallets soient bien établis.
             if self._refresh_count > 0 and self._refresh_count % self.discovery_ratio == 0:
                 await self._run_discovery()
 
@@ -128,7 +161,6 @@ class WalletRefresher:
         try:
             analyses = await self.scanner.refresh_tracked_wallets()
 
-            # Sync consecutive_losses en DB pour chaque wallet refreshé
             await self._sync_consecutive_losses(analyses)
 
             new_count = 0
@@ -189,13 +221,12 @@ class WalletRefresher:
         try:
             result = await scanner.discover()
 
-            # Alertes pour les nouveaux wallets trouvés
             for address in result.new_wallets:
                 self._known_wallets.add(address)
                 try:
                     await self.notifier.notify_new_insider(
                         wallet=address,
-                        score=0.0,    # score sera mis à jour au prochain refresh
+                        score=0.0,
                         win_rate=0.0,
                         total_trades=0,
                     )
@@ -211,7 +242,6 @@ class WalletRefresher:
         """Retourne le WalletScanner injecté ou None si pas disponible."""
         if self._wallet_scanner is not None:
             return self._wallet_scanner
-        # Création lazy si le client est accessible via le scanner
         try:
             from bot.scanner.wallet_scanner import WalletScanner
             client = getattr(self.scanner, "client", None)
