@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.2
+PolyInsider Bot v2.3
 =====================
 Architecture 7 phases + 2 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -10,9 +10,12 @@ Architecture 7 phases + 2 background tasks:
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
   7. Performance report — win rate / PnL / trades          [périodique]
   └ WalletRefresher    — refresh wallets insiders          [background, 60min]
-  └ ExitManager        — TP / SL / durée max              [background, 60s]
+  └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
 
-v2.2: Losing streak protection — consecutive_losses passé au ConvictionFilter
+v2.3:
+  - entry_timing_score passé au ConvictionFilter
+  - Liquidité dynamique dans MarketAnalyzer (trade_amount)
+  - Vente partielle TP1 (+20%/50%) + TP2 (+40%/100%) dans ExitManager
 """
 import asyncio
 import signal
@@ -48,6 +51,7 @@ async def process_new_trade(
     wallet_address: str,
     wallet_score: float,
     consecutive_losses: int,
+    entry_timing_score: float,
     engine: TradingEngine,
     notifier: TelegramNotifier,
     client: PolymarketDataClient,
@@ -66,13 +70,14 @@ async def process_new_trade(
     if not token_id or price <= 0 or amount <= 0:
         return
 
-    # Étape 1 — Filtre de conviction (inclut losing streak check)
+    # Étape 1 — Filtre de conviction (losing streak + timing + bet + prix + wallet)
     f = conv_filter.evaluate(
         source_amount=amount,
         price=price,
         wallet_score=wallet_score,
         market_id=condition_id,
         consecutive_losses=consecutive_losses,
+        entry_timing_score=entry_timing_score,   # ← NEW v2.3
     )
     if not f.passed:
         return
@@ -98,7 +103,7 @@ async def process_new_trade(
     market_info = await client.get_market_info(condition_id) if condition_id else None
     question    = market_info.get("question", "") if market_info else ""
 
-    # Étape 5 — Sizing Kelly standalone
+    # Étape 5 — Sizing Kelly
     size = sizer.calculate(yes_price=price, conviction_score=f.score, source_amount=amount)
     logger.debug(f"[SIZE] {size.rationale}")
 
@@ -167,7 +172,7 @@ async def main_loop(
                 await notifier.notify_convergence(sig)
 
             # Phase 3 — Insider copy trading
-            # On charge address + score + consecutive_losses depuis la DB
+            # On charge address + score + consecutive_losses + entry_timing_score
             with get_db() as db:
                 wallets = (
                     db.query(TrackedWallet)
@@ -180,6 +185,7 @@ async def main_loop(
                         w.address,
                         float(w.score or 0.70),
                         int(getattr(w, "consecutive_losses", 0) or 0),
+                        float(getattr(w, "entry_timing_score", 0.5) or 0.5),  # ← NEW v2.3
                     )
                     for w in wallets
                 ]
@@ -190,10 +196,10 @@ async def main_loop(
                 continue
 
             all_trades = await asyncio.gather(
-                *[scanner.get_new_trades(addr) for addr, _, _ in wallet_data],
+                *[scanner.get_new_trades(addr) for addr, _, _, _ in wallet_data],
                 return_exceptions=True,
             )
-            for (addr, score, losses), trades in zip(wallet_data, all_trades):
+            for (addr, score, losses, timing), trades in zip(wallet_data, all_trades):
                 if isinstance(trades, Exception):
                     logger.warning(f"Scan error {addr[:8]}: {trades}")
                     continue
@@ -203,6 +209,7 @@ async def main_loop(
                         wallet_address=addr,
                         wallet_score=score,
                         consecutive_losses=losses,
+                        entry_timing_score=timing,     # ← NEW v2.3
                         engine=engine, notifier=notifier, client=client,
                         risk_manager=risk_manager, position_manager=position_manager,
                         performance_tracker=performance_tracker,
@@ -245,7 +252,7 @@ async def main_loop(
                                         hot, top_n=settings.llm_top_markets
                                     ):
                                         logger.info(
-                                            f"[LLM] {sig.recommendation} ‘{sig.question[:45]}’ "
+                                            f"[LLM] {sig.recommendation} '{sig.question[:45]}' "
                                             f"conf={sig.confidence:.0%} misprice={sig.mispricing_pct:.1%}"
                                         )
                                         await notifier.notify_llm_signal(sig)
@@ -276,12 +283,14 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.2")
+    logger.info("  PolyInsider Bot v2.3")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
     logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
     logger.info("  Losing streak protection: ON 🛡️")
+    logger.info("  Entry timing filter:      ON ⏱️")
+    logger.info("  Partial TP sell (50/50):  ON 💰")
     logger.info("=" * 62)
 
     init_db()
