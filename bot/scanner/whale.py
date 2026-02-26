@@ -5,30 +5,33 @@ from bot.utils.logger import logger
 
 settings = get_settings()
 
-# FIX: seuil de résolution — au-delà le marché est quasi-résolu, les
-# alertes whale sont du bruit (rachats de tokens à valeur faciale, pas de signal).
-RESOLVING_HIGH = 0.95   # prix YES > 0.95 → marché considéré résolu YES
-RESOLVING_LOW  = 0.05   # prix YES < 0.05 → marché considéré résolu NO
+RESOLVING_HIGH = 0.95
+RESOLVING_LOW  = 0.05
 
 
 class WhaleTracker:
     """
     Détecte les gros mouvements de capitaux sur Polymarket.
 
-    Stratégie de déduplication :
-      1. Si transactionHash présent  → clé = transactionHash
-      2. Sinon                        → clé = proxyWallet + '|' + conditionId + '|' + str(timestamp)
-    Ainsi un trade sans hash n'est jamais re-notifié deux fois.
-
-    FIX: filtre les marchés quasi-résolus (price >0.95 ou <0.05).
-    Ces trades sont des rachats de tokens à valeur quasi-faciale — pas des signaux
-    d'insiders. Ils génèrent du spam Telegram et faussent le score des wallets.
-    FIX: filtre aussi les SELL — seuls les BUY sont des signaux d'entrée.
+    Filtres actifs:
+      1. Déduplication par transactionHash (ou wallet+market+timestamp)
+      2. Marchés quasi-résolus (price >0.95 ou <0.05) → skippés
+      3. SELL → skippés (sorties de position, pas des signaux d'entrée)
+      4. Mots-clés bruit (sports, crypto daily, etc.) → skippés
+         Configurable via WHALE_KEYWORDS_BLACKLIST dans .env
     """
 
     def __init__(self, client: PolymarketDataClient):
         self.client = client
         self._seen: set[str] = set()
+        # Cache des mots-clés (immutables pour la durée de vie du process)
+        self._noise_keywords: list[str] = settings.get_whale_keywords_blacklist()
+        if self._noise_keywords:
+            logger.info(
+                f"[WHALE] Keyword filter active: {len(self._noise_keywords)} keywords"
+            )
+        else:
+            logger.info("[WHALE] Keyword filter disabled (WHALE_KEYWORDS_BLACKLIST=__none__)")
 
     @staticmethod
     def _dedup_key(trade: dict) -> str:
@@ -40,8 +43,14 @@ class WhaleTracker:
 
     @staticmethod
     def _is_market_resolved(price: float) -> bool:
-        """Retourne True si le marché est quasi-résolu (pas de signal utile)."""
         return price >= RESOLVING_HIGH or price <= RESOLVING_LOW
+
+    def _is_noise_market(self, title: str) -> bool:
+        """Retourne True si le titre contient un mot-clé de la blacklist."""
+        if not self._noise_keywords:
+            return False
+        t = title.lower()
+        return any(kw in t for kw in self._noise_keywords)
 
     async def scan(self) -> list[dict]:
         large_trades = await self.client.get_recent_large_trades(
@@ -69,18 +78,19 @@ class WhaleTracker:
             amount = float(trade.get("usdcSize", 0))
             title  = trade.get("title", "") or trade.get("conditionId", "???")[:20]
 
-            # FIX: ignore les marchés résolus — pas de signal, spam pur
+            # Filtre 1 — marché quasi-résolu
             if self._is_market_resolved(price):
-                logger.debug(
-                    f"[WHALE skip] Resolved market @ {price:.3f} — {title[:45]}"
-                )
+                logger.debug(f"[WHALE skip/resolved] @ {price:.3f} — {title[:50]}")
                 continue
 
-            # FIX: ignore les SELL — ce sont des sorties de position, pas des entrées
+            # Filtre 2 — SELL (sortie de position)
             if side == "SELL":
-                logger.debug(
-                    f"[WHALE skip] SELL ignored — {wallet[:10]}... ${amount:,.0f} on {title[:35]}"
-                )
+                logger.debug(f"[WHALE skip/sell] {wallet[:10]}... ${amount:,.0f} — {title[:40]}")
+                continue
+
+            # Filtre 3 — marché bruit (sports, crypto daily, etc.)
+            if self._is_noise_market(title):
+                logger.debug(f"[WHALE skip/noise] {title[:60]}")
                 continue
 
             logger.info(
