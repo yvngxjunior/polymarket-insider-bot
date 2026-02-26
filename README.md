@@ -1,4 +1,4 @@
-# PolyInsider Bot v2.1
+# CaliforniaCrazy
 
 > **Copy-trade Polymarket insiders** — détecte les wallets smart money, copie leurs positions et gère le risque automatiquement.
 
