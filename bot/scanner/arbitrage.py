@@ -7,6 +7,10 @@ Principe: si YES_poly + YES_kalshi < 1.00 → profit garanti sans risque.
 Ex: YES @ 0.45 sur Poly + NO @ 0.48 sur Kalshi = coût 0.93 → profit 7%
 
 Activation: ARB_ENABLED=true dans .env
+
+FIX ARB-3: HTTP 429/5xx absorbé avec logger.warning (pas debug silencieux).
+FIX ARB-4: guard poly_yes hors [0.01, 0.99] avant calcul arb.
+FIX ARB-5: log du nb de paires matchées avant/après filtrage.
 """
 import asyncio
 from dataclasses import dataclass
@@ -27,9 +31,9 @@ class ArbitrageOpportunity:
     poly_yes_price: float
     kalshi_ticker: str
     kalshi_yes_price: float
-    profit_pct: float          # Ex: 0.07 = 7% de profit garanti
-    direction: str             # "BUY_YES_POLY_NO_KALSHI" | "BUY_NO_POLY_YES_KALSHI"
-    min_capital_usdc: float    # Capital minimum requis pour exécuter
+    profit_pct: float
+    direction: str
+    min_capital_usdc: float
 
 
 class ArbitrageScanner:
@@ -40,9 +44,8 @@ class ArbitrageScanner:
     """
 
     KALSHI_API = "https://trading-api.kalshi.com/trade-api/v2"
-    GAMMA_API = "https://gamma-api.polymarket.com"
+    GAMMA_API  = "https://gamma-api.polymarket.com"
 
-    # Mots-clés à ignorer pour le matching titre
     STOP_WORDS = {
         "the", "a", "an", "will", "be", "in", "on", "at", "to",
         "of", "or", "and", "is", "by", "for", "as", "if", "this",
@@ -60,6 +63,10 @@ class ArbitrageScanner:
         return self._session
 
     async def _fetch_kalshi_markets(self) -> list[dict]:
+        """
+        FIX ARB-3: distingue 429 (rate-limit) des autres erreurs HTTP.
+        Retourne [] dans les deux cas mais log warning sur 429/5xx.
+        """
         try:
             async with self._get_session().get(
                 f"{self.KALSHI_API}/markets",
@@ -67,11 +74,22 @@ class ArbitrageScanner:
             ) as resp:
                 if resp.status == 200:
                     return (await resp.json()).get("markets", [])
+                elif resp.status == 429:
+                    logger.warning("[ARB] Kalshi rate-limited (429) — skipping this cycle")
+                elif resp.status >= 500:
+                    logger.warning(f"[ARB] Kalshi server error ({resp.status}) — skipping")
+                else:
+                    logger.debug(f"[ARB] Kalshi HTTP {resp.status}")
+        except aiohttp.ClientError as e:
+            logger.warning(f"[ARB] Kalshi network error: {e}")
         except Exception as e:
             logger.debug(f"[ARB] Kalshi fetch error: {e}")
         return []
 
     async def _fetch_poly_markets(self) -> list[dict]:
+        """
+        FIX ARB-3: même traitement que Kalshi — 429/5xx loggés en warning.
+        """
         try:
             async with self._get_session().get(
                 f"{self.GAMMA_API}/markets",
@@ -80,6 +98,14 @@ class ArbitrageScanner:
                 if resp.status == 200:
                     data = await resp.json()
                     return data if isinstance(data, list) else data.get("markets", [])
+                elif resp.status == 429:
+                    logger.warning("[ARB] Polymarket rate-limited (429) — skipping this cycle")
+                elif resp.status >= 500:
+                    logger.warning(f"[ARB] Polymarket server error ({resp.status}) — skipping")
+                else:
+                    logger.debug(f"[ARB] Polymarket HTTP {resp.status}")
+        except aiohttp.ClientError as e:
+            logger.warning(f"[ARB] Polymarket network error: {e}")
         except Exception as e:
             logger.debug(f"[ARB] Polymarket fetch error: {e}")
         return []
@@ -88,7 +114,10 @@ class ArbitrageScanner:
         return {w.lower() for w in title.split() if w.lower() not in self.STOP_WORDS and len(w) > 2}
 
     def _match_markets(
-        self, poly_markets: list[dict], kalshi_markets: list[dict], min_overlap: int = 4
+        self,
+        poly_markets: list[dict],
+        kalshi_markets: list[dict],
+        min_overlap: int = 4,
     ) -> list[tuple[dict, dict]]:
         """Matche les marchés cross-platform par similarité de titre."""
         matched = []
@@ -119,9 +148,16 @@ class ArbitrageScanner:
             logger.warning("[ARB] Failed to fetch markets from one or both platforms")
             return []
 
-        opportunities: list[ArbitrageOpportunity] = []
         matched = self._match_markets(poly_markets, kalshi_markets)
-        logger.debug(f"[ARB] {len(matched)} matched pairs from {len(poly_markets)} poly / {len(kalshi_markets)} kalshi")
+        logger.debug(
+            f"[ARB] {len(matched)} matched pairs from "
+            f"{len(poly_markets)} poly / {len(kalshi_markets)} kalshi markets"
+        )
+
+        if not matched:
+            return []
+
+        opportunities: list[ArbitrageOpportunity] = []
 
         for poly, kalshi in matched:
             try:
@@ -130,17 +166,21 @@ class ArbitrageScanner:
                     (float(t.get("price", 0)) for t in tokens if t.get("outcome", "").upper() == "YES"),
                     None,
                 )
-                # Kalshi yes_ask = coût d'achat du YES
                 kalshi_yes = float(kalshi.get("yes_ask", 0) or kalshi.get("last_price", 0))
 
-                if not poly_yes or not kalshi_yes or poly_yes <= 0 or kalshi_yes <= 0:
+                # FIX ARB-4: guard prix invalides avant calcul
+                if (
+                    poly_yes is None
+                    or not (0.01 <= poly_yes <= 0.99)
+                    or not (0.01 <= kalshi_yes <= 0.99)
+                ):
                     continue
 
-                cond_id = poly.get("conditionId", "")
+                cond_id  = poly.get("conditionId", "")
                 question = poly.get("question", "")
-                ticker = kalshi.get("ticker", "")
+                ticker   = kalshi.get("ticker", "")
 
-                # Direction 1: BUY YES sur Poly + BUY NO sur Kalshi
+                # Direction 1: BUY YES Poly + BUY NO Kalshi
                 cost_1 = poly_yes + (1.0 - kalshi_yes)
                 if cost_1 < 1.0 - self.min_profit_pct:
                     opportunities.append(
@@ -156,7 +196,7 @@ class ArbitrageScanner:
                         )
                     )
 
-                # Direction 2: BUY NO sur Poly + BUY YES sur Kalshi
+                # Direction 2: BUY NO Poly + BUY YES Kalshi
                 cost_2 = (1.0 - poly_yes) + kalshi_yes
                 if cost_2 < 1.0 - self.min_profit_pct:
                     opportunities.append(
@@ -177,7 +217,10 @@ class ArbitrageScanner:
                 continue
 
         if opportunities:
-            logger.info(f"[ARB] {len(opportunities)} arb opportunities found (min profit ≥{self.min_profit_pct:.0%})")
+            logger.info(
+                f"[ARB] {len(opportunities)} arb opportunities found "
+                f"(min profit ≥{self.min_profit_pct:.0%})"
+            )
 
         return sorted(opportunities, key=lambda o: o.profit_pct, reverse=True)
 

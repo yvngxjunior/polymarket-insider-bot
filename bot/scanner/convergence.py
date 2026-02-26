@@ -39,15 +39,13 @@ class ConvergenceDetector:
     Détecte quand plusieurs wallets insiders s'alignent sur le même outcome.
     Fenêtre de détection: 10 minutes. Seuil minimum: 2 wallets.
 
-    FIX BUG-3: nettoyage périodique de _recent_trades (anti-leak mémoire).
-    FIX M2: confidence calculée correctement (scores déjà entre 0 et 1).
+    FIX BUG-3:  nettoyage périodique de _recent_trades (anti-leak mémoire).
+    FIX M2:     confidence calculée correctement (scores déjà entre 0 et 1).
     FIX CONV-1: normalisation timestamp ms→s.
     FIX CONV-2: guard float(amount or 0) et float(price or 0).
-    FIX CONV-4: fenêtre calculée avec datetime.utcnow() au lieu du timestamp API.
-      Avant: now = timestamp (temps du trade API)
-      → si trade ancien (lag/cache), la cutoff était dans le passé
-      → faux-négatifs (trades récents exclus de la fenêtre).
-      Après: now = datetime.utcnow().timestamp() (temps réel).
+    FIX CONV-4: fenêtre calculée avec datetime.utcnow() (pas timestamp API).
+    FIX CONV-5: avg_price et total_amount dédupliqués par wallet (biais multi-trades).
+    FIX CONV-6: _compute_confidence log warning si aucun wallet trouvé en DB.
     """
 
     WINDOW_SECONDS = 600
@@ -76,7 +74,7 @@ class ConvergenceDetector:
         amount = float(amount or 0)
         price  = float(price or 0)
 
-        # FIX CONV-4: fenêtre calculée avec now() réel, pas timestamp API
+        # FIX CONV-4: fenêtre basée sur now() réel, pas timestamp API
         now    = datetime.utcnow().timestamp()
         cutoff = now - self.WINDOW_SECONDS
 
@@ -101,14 +99,24 @@ class ConvergenceDetector:
         if len(unique_wallets) < self.MIN_WALLETS:
             return None
 
+        # FIX CONV-5: déduplication par wallet avant calcul avg_price + total_amount
+        # Sans dédup, un wallet actif avec 10 trades biaisait fortement la moyenne
+        # en lui donnant 10x plus de poids qu'un wallet avec 1 seul trade.
+        unique_trades = list({t["wallet"]: t for t in same_side}.values())
+        total_amount = sum(t["amount"] for t in unique_trades)
+        avg_price = (
+            sum(t["price"] for t in unique_trades) / len(unique_trades)
+            if unique_trades else 0.0
+        )
+
         confidence = await self._compute_confidence(unique_wallets)
         signal = ConvergenceSignal(
             token_id=token_id,
             condition_id=condition_id,
             side=side,
             wallet_count=len(unique_wallets),
-            total_amount_usdc=sum(t["amount"] for t in same_side),
-            avg_price=sum(t["price"] for t in same_side) / len(same_side),
+            total_amount_usdc=total_amount,
+            avg_price=avg_price,
             wallets=unique_wallets,
             confidence=confidence,
         )
@@ -130,10 +138,18 @@ class ConvergenceDetector:
             logger.debug(f"[CONV] Cleaned {len(stale_keys)} stale token_id(s) from memory")
 
     async def _compute_confidence(self, wallet_addresses: list[str]) -> float:
+        """FIX CONV-6: log warning si aucun wallet trouvé en DB (signal sans base)."""
         try:
             with get_db() as db:
                 wallets = [db.get(TrackedWallet, addr) for addr in wallet_addresses]
                 scores = [w.score for w in wallets if w is not None and w.score is not None]
-            return sum(scores) / len(scores) if scores else 0.5
-        except Exception:
+            if not scores:
+                logger.warning(
+                    f"[CONV] _compute_confidence: none of {len(wallet_addresses)} wallet(s) "
+                    f"found in DB — defaulting confidence=0.5"
+                )
+                return 0.5
+            return sum(scores) / len(scores)
+        except Exception as e:
+            logger.debug(f"[CONV] _compute_confidence error: {e}")
             return 0.5

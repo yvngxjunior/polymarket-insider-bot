@@ -12,10 +12,10 @@ Filtre multi-critères avant exécution d'un trade copié:
 FIX #3        — _market_copies : nettoyage borné toutes les N évaluations.
 FIX #5        — Poids de scoring normalisés correctement.
 FIX #8        — rate-limit chargé depuis DB au démarrage.
-FIX FILTER-1  — query rate-limit : status='executed' → LIKE '%EXECUTED%'
-  Avant: status='executed' (lowercase) ne matchait pas TradeStatus.EXECUTED
-  qui peut être stocké comme 'EXECUTED' (majuscules) ou comme int selon le dialecte.
-  Après: status LIKE '%EXECUTED%' (case-insensitive, robuste).
+FIX FILTER-1  — status LIKE '%EXECUTED%' (case-insensitive).
+FIX FILTER-2  — MAX_CONSECUTIVE_LOSSES lu depuis settings (zéro hardcode).
+FIX FILTER-3  — accès direct settings (pas getattr() redondants).
+FIX FILTER-4  — enregistrement rate-limit après tous les checks (pas avant).
 """
 from collections import defaultdict
 from dataclasses import dataclass
@@ -38,30 +38,27 @@ class FilterResult:
 
 class ConvictionFilter:
 
-    _DEFAULT_MIN_BET   = 50.0
-    _DEFAULT_MIN_SCORE = 0.65
     _DEFAULT_MAX_PRICE = 0.92
     _DEFAULT_MIN_PRICE = 0.04
     _MAX_COPIES_PER_HOUR = 3
-
-    MAX_CONSECUTIVE_LOSSES = 3
     MAX_ENTRY_PRICE_TIMING = 0.70
     MIN_TIMING_SCORE       = 0.30
 
     def __init__(self) -> None:
-        self.min_bet: float   = getattr(settings, "min_source_bet_usdc", self._DEFAULT_MIN_BET)
-        self.min_score: float = getattr(settings, "min_wallet_score", self._DEFAULT_MIN_SCORE)
+        # FIX FILTER-3: accès direct (champs Pydantic définis, getattr inutile)
+        self.min_bet: float   = settings.min_source_bet_usdc
+        self.min_score: float = settings.min_wallet_score
         self.max_price: float = settings.max_price
         self.min_price: float = settings.min_price
+        # FIX FILTER-2: lu depuis settings (zéro hardcode)
+        self.max_consecutive_losses: int = settings.max_consecutive_losses
         self._market_copies: dict[str, list[datetime]] = defaultdict(list)
         self._eval_count: int = 0
         self._load_rate_limit_from_db()
 
     def _load_rate_limit_from_db(self) -> None:
         """
-        FIX FILTER-1: status LIKE '%EXECUTED%' au lieu de ='executed'.
-        TradeStatus.EXECUTED peut être stocké comme 'EXECUTED' (majuscules)
-        ou comme entier selon le dialecte SQLAlchemy.
+        FIX FILTER-1: status LIKE '%EXECUTED%' (robuste multi-dialecte).
         """
         try:
             from bot.database import engine
@@ -138,6 +135,10 @@ class ConvictionFilter:
         return FilterResult(passed=True, reason="ok", score=wallet_score)
 
     def _check_rate_limit(self, market_id: str) -> FilterResult:
+        """Vérifie le rate-limit SANS enregistrer la copie ici.
+        L'enregistrement est fait dans evaluate() après tous les checks passés.
+        FIX FILTER-4: évite de compter un trade refusé dans le rate-limit.
+        """
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=1)
         recent = [t for t in self._market_copies[market_id] if t > cutoff]
@@ -150,7 +151,8 @@ class ConvictionFilter:
         return FilterResult(passed=True, reason="ok", score=1.0)
 
     def _check_losing_streak(self, consecutive_losses: int) -> FilterResult:
-        if consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+        # FIX FILTER-2: seuil lu depuis self.max_consecutive_losses (settings)
+        if consecutive_losses >= self.max_consecutive_losses:
             return FilterResult(
                 passed=False,
                 reason=(
@@ -235,6 +237,7 @@ class ConvictionFilter:
         total_w   = sum(weights)
         avg_score = sum(c.score * w for c, w in zip(checks, weights)) / total_w
 
+        # FIX FILTER-4: enregistrement APRES tous les checks passés
         if market_id:
             self._market_copies[market_id].append(datetime.utcnow())
 
