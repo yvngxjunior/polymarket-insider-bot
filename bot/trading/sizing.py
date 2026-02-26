@@ -5,10 +5,11 @@ Formule Kelly: f* = (p * (b+1) - 1) / b
   où p = win_rate estimé, b = (1-price)/price
   On applique kelly_fraction_sizer (défaut 0.25 = Quarter-Kelly) pour limiter la variance.
 
-FIX BUG-8: PositionSizer._capital synchronisé avec RiskManager.portfolio.total_capital
-  avant chaque calcul via sync_capital().
-
+FIX BUG-8:   PositionSizer._capital synchronisé avec RiskManager.portfolio.total_capital
+             avant chaque calcul via sync_capital().
 FIX SIZER-1: TIERED_MULTIPLIERS configurable via .env.
+FIX SIZER-2: _parse_tiered_multipliers guard ValueError sur format invalide.
+FIX SIZER-3: calculate() guard conviction_score <= 0 → fallback min_trade_usdc.
 FIX ZERO-HARDCODE: toutes les constantes lues depuis settings.
 """
 from __future__ import annotations
@@ -44,6 +45,9 @@ def _parse_tiered_multipliers(raw: str) -> list[TieredBand]:
     Parse la chaîne TIERED_MULTIPLIERS depuis .env.
     Format: "min-max:mult,min+:mult"
     Retourne [] si raw est vide ou invalide.
+
+    FIX SIZER-2: guard explicite sur split ':' manquant → ValueError propre
+    avec message clair au lieu de crash silencieux.
     """
     if not raw or not raw.strip():
         return []
@@ -53,14 +57,25 @@ def _parse_tiered_multipliers(raw: str) -> list[TieredBand]:
             part = part.strip()
             if not part:
                 continue
-            range_str, mult_str = part.split(":")
+            # FIX SIZER-2: valider le format avant split
+            if ":" not in part:
+                raise ValueError(
+                    f"Missing ':' separator in band '{part}' — "
+                    f"expected format 'min-max:mult' or 'min+:mult'"
+                )
+            range_str, mult_str = part.split(":", 1)
             mult = float(mult_str)
             range_str = range_str.strip()
             if range_str.endswith("+"):
                 min_v = float(range_str[:-1])
                 max_v = float("inf")
             else:
-                lo, hi = range_str.split("-")
+                if "-" not in range_str:
+                    raise ValueError(
+                        f"Missing '-' in range '{range_str}' — "
+                        f"expected 'min-max' format"
+                    )
+                lo, hi = range_str.split("-", 1)
                 min_v = float(lo)
                 max_v = float(hi)
             bands.append(TieredBand(min_usd=min_v, max_usd=max_v, multiplier=mult))
@@ -94,7 +109,6 @@ class PositionSizer:
       TIERED_MULTIPLIERS    (défaut: vide = Kelly pur)
     """
 
-    # ── Properties alias → settings.* (zéro hardcode, rétro-compatibilité) ──
     @property
     def MIN_TRADE_USDC(self) -> float:
         return settings.min_trade_usdc
@@ -126,7 +140,7 @@ class PositionSizer:
             self._capital = capital_usdc
 
     def sync_capital(self, risk_manager) -> None:
-        """Synchronise le capital depuis RiskManager.portfolio.total_capital."""
+        """FIX BUG-8: Synchronise le capital depuis RiskManager.portfolio.total_capital."""
         try:
             cap = risk_manager.portfolio.total_capital
             if cap > 0:
@@ -140,12 +154,25 @@ class PositionSizer:
         conviction_score: float,
         source_amount: float = 0.0,
     ) -> SizeResult:
+        # FIX SIZER-3: conviction_score invalide → fallback min_trade_usdc
+        if conviction_score <= 0:
+            logger.debug(
+                f"[SIZER] conviction_score={conviction_score:.3f} <= 0 "
+                f"— fallback to min_trade_usdc"
+            )
+            return SizeResult(
+                amount_usdc=settings.min_trade_usdc,
+                pct_of_capital=0.0,
+                kelly_fraction=0.0,
+                rationale=f"conviction_score={conviction_score:.3f} invalide → min",
+            )
+
         if not (0.01 <= yes_price <= 0.99):
             return SizeResult(
                 amount_usdc=settings.min_trade_usdc,
                 pct_of_capital=0.0,
                 kelly_fraction=0.0,
-                rationale=f"Invalid price {yes_price:.3f}",
+                rationale=f"Invalid price {yes_price:.3f} → min ${settings.min_trade_usdc}",
             )
 
         p = max(0.01, min(0.99, conviction_score))

@@ -40,12 +40,8 @@ class PositionManager:
     mais la boucle active est supprimee.
 
     FIX PM-1 -- is_open() fallback DB + rechargement au demarrage.
-    L'ancienne version ne consultait que _positions (dict in-memory, vide
-    apres restart) -> toutes les positions semblaient fermees au redemarrage
-    -> risque de double-entry sur un token deja en portefeuille.
-    Correction: _load_open_positions() au __init__ reconstitue le dict
-    depuis copied_trades (executed + NOT CLOSED). is_open() garde le
-    lookup O(1) in-memory en premier, puis fallback DB si necessaire.
+    FIX PM-2 -- register() guard entry_price <= 0.
+    FIX PM-3 -- is_open() fallback DB log debug (hot path, pas de spam).
     """
 
     TAKE_PROFIT_PCT = 0.40
@@ -73,8 +69,6 @@ class PositionManager:
         """
         Recharge les positions ouvertes depuis copied_trades au demarrage.
         Critères: status=EXECUTED et skip_reason NOT LIKE 'CLOSED%'.
-        Reconstitue _positions avec des OpenPosition minimaux (pas de trade_id
-        complet, mais suffisant pour le guard is_open() dans main.py).
         """
         try:
             from bot.database import get_db, CopiedTrade, TradeStatus
@@ -119,26 +113,38 @@ class PositionManager:
         side: str,
         market_question: str = "",
     ) -> None:
+        # FIX PM-2: guard entry_price invalide
+        if entry_price <= 0:
+            logger.warning(
+                f"[POS] register() called with entry_price={entry_price} "
+                f"token={token_id[:20]}... — position enregistrée avec prix nul, "
+                f"ExitManager ne pourra pas calculer le PnL correctement."
+            )
         self._positions[token_id] = OpenPosition(
             trade_id=trade_id, token_id=token_id, entry_price=entry_price,
             amount_usdc=amount_usdc, side=side, market_question=market_question,
             opened_at=datetime.utcnow(),
         )
-        logger.info(f"Position registered: {market_question[:40]} @ {entry_price:.3f}")
+        logger.info(
+            f"[POS] Position registered: {market_question[:40] or token_id[:20]} "
+            f"@ {entry_price:.3f} ${amount_usdc:.2f}"
+        )
 
     def unregister(self, token_id: str) -> None:
-        """Appele par ExitManager apres une fermeture reelle pour nettoyer le registre."""
-        self._positions.pop(token_id, None)
+        """Appelé par ExitManager après une fermeture réelle pour nettoyer le registre."""
+        removed = self._positions.pop(token_id, None)
+        if removed:
+            logger.debug(f"[POS] Unregistered: {token_id[:20]}")
 
     def is_open(self, token_id: str) -> bool:
         """
         FIX PM-1: lookup in-memory O(1) en premier.
-        Si absent (dict pas encore peuple apres un register() manque),
-        fallback vers la DB pour securite anti-double-entry.
+        Si absent, fallback vers la DB pour sécurité anti-double-entry.
+        FIX PM-3: fallback log debug (pas warning) → pas de spam sur le hot path.
         """
         if token_id in self._positions:
             return True
-        # Fallback DB: verifie si un trade EXECUTED non CLOSED existe pour ce token
+        # Fallback DB: vérifie si un trade EXECUTED non CLOSED existe pour ce token
         try:
             from bot.database import get_db, CopiedTrade, TradeStatus
             with get_db() as db:
@@ -153,8 +159,9 @@ class PositionManager:
                 )
                 return exists is not None
         except Exception as e:
-            logger.warning(f"[POS] DB is_open fallback failed for {token_id[:20]}: {e}")
+            # FIX PM-3: debug (pas warning) — ce path est appelé à chaque trade scan
+            logger.debug(f"[POS] DB is_open fallback failed for {token_id[:20]}: {e}")
             return False
 
     # start_monitoring() volontairement absent -- voir docstring.
-    # Ne pas reintroduire sans resoudre BUG-1 proprement.
+    # Ne pas réintroduire sans résoudre BUG-1 proprement.

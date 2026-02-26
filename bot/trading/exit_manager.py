@@ -20,6 +20,9 @@ FIX EXIT-2 — _get_current_price accepte maintenant le side (BUY/SELL)
                pour éviter le calcul de PnL faux sur les positions SELL.
 FIX EXIT-3 — guard trade.id is None dans _check_positions
                pour éviter KeyError sur _partial_sold[None].
+FIX EXIT-4 — _calc_pnl_usdc guard entry <= 0 → plus de ZeroDivisionError.
+FIX EXIT-5 — RESOLVING_THRESH_NO constante nommée pour la borne basse.
+FIX EXIT-6 — _should_exit guard entry_price <= 0 avant calcul pnl_pct.
 """
 import asyncio
 from datetime import datetime
@@ -50,13 +53,15 @@ class ExitManager:
     PositionManager ne doit PAS appeler release_position() (cf. BUG-1).
     """
 
-    TAKE_PROFIT1_PCT = 0.20
-    TAKE_PROFIT2_PCT = 0.40
-    STOP_LOSS_PCT    = 0.30
-    MAX_HOLD_HOURS   = 72
-    RESOLVING_THRESH = 0.95
-    CHECK_INTERVAL   = 60
-    PARTIAL_SELL_PCT = 0.50
+    TAKE_PROFIT1_PCT  = 0.20
+    TAKE_PROFIT2_PCT  = 0.40
+    STOP_LOSS_PCT     = 0.30
+    MAX_HOLD_HOURS    = 72
+    # FIX EXIT-5: constantes nommées pour les deux bornes de résolution
+    RESOLVING_THRESH_YES = 0.95   # marché qui résout YES
+    RESOLVING_THRESH_NO  = 0.05   # marché qui résout NO  (= 1 - YES)
+    CHECK_INTERVAL    = 60
+    PARTIAL_SELL_PCT  = 0.50
 
     def __init__(
         self,
@@ -132,10 +137,7 @@ class ExitManager:
     ) -> Optional[float]:
         """
         Récupère le prix actuel du token pour le side donné.
-
-        FIX EXIT-2: le side était hardcodé à BUY, ce qui donnait un prix
-        incorrect (et donc un PnL/TP/SL faux) pour les positions SELL.
-        On passe maintenant trade.side depuis _check_positions().
+        FIX EXIT-2: side passé explicitement pour éviter un PnL faux sur SELL.
         """
         try:
             async with self._get_session().get(
@@ -165,7 +167,18 @@ class ExitManager:
         Détermine quelle action prendre.
         Returns: (action, reason, sell_amount_usdc)
           action: "PARTIAL" | "FULL" | "NONE"
+
+        FIX EXIT-6: guard entry_price <= 0 → évite ZeroDivisionError
+        et retourne NONE (on ne sait pas gérer cette position).
         """
+        # FIX EXIT-6: entry_price invalide → position non gérée
+        if entry_price <= 0:
+            logger.warning(
+                f"[EXIT] _should_exit: invalid entry_price={entry_price} "
+                f"trade_id={trade_id} — skipping"
+            )
+            return "NONE", "", 0.0
+
         if side.upper() == "BUY":
             pnl_pct = (current_price - entry_price) / entry_price
         else:
@@ -177,9 +190,10 @@ class ExitManager:
         if pnl_pct <= -self.STOP_LOSS_PCT:
             return "FULL", f"SL {pnl_pct:.1%}", remaining
 
-        if current_price >= self.RESOLVING_THRESH:
+        # FIX EXIT-5: utilise les constantes nommées
+        if current_price >= self.RESOLVING_THRESH_YES:
             return "FULL", f"Market resolving YES @ {current_price:.2f}", remaining
-        if current_price <= (1.0 - self.RESOLVING_THRESH):
+        if current_price <= self.RESOLVING_THRESH_NO:
             return "FULL", f"Market resolving NO @ {current_price:.2f}", remaining
 
         if executed_at:
@@ -199,7 +213,14 @@ class ExitManager:
     def _calc_pnl_usdc(
         self, entry: float, current: float, amount: float, side: str
     ) -> float:
-        shares = amount / entry if entry > 0 else 0
+        """
+        FIX EXIT-4: guard entry <= 0 pour éviter ZeroDivisionError.
+        Retourne 0.0 si entry invalide.
+        """
+        if entry <= 0:
+            logger.warning(f"[EXIT] _calc_pnl_usdc: invalid entry={entry} — returning 0")
+            return 0.0
+        shares = amount / entry
         return shares * (current - entry if side.upper() == "BUY" else entry - current)
 
     # ------------------------------------------------------------------
@@ -221,6 +242,11 @@ class ExitManager:
                 )
                 .all()
             )
+
+        if not open_trades:
+            return
+
+        logger.debug(f"[EXIT] Checking {len(open_trades)} open position(s)...")
 
         for trade in open_trades:
             # FIX EXIT-3: trade.id peut être None si non encore flushé
