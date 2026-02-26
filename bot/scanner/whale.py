@@ -9,44 +9,57 @@ settings = get_settings()
 class WhaleTracker:
     """
     Détecte les gros mouvements de capitaux sur Polymarket.
-    Un 'whale event' = un trade unique dépassant le seuil configuré.
 
-    La Data API /trades retourne les champs :
-      proxyWallet, side, asset, conditionId, size, price, timestamp, title, transactionHash
-    get_recent_large_trades() normalise proxyWallet → 'maker' en interne.
+    Stratégie de déduplication :
+      1. Si transactionHash présent  → clé = transactionHash
+      2. Sinon                        → clé = proxyWallet + '|' + conditionId + '|' + str(timestamp)
+    Ainsi un trade sans hash n'est jamais re-notifié deux fois.
     """
 
     def __init__(self, client: PolymarketDataClient):
         self.client = client
-        self._seen_tx: set[str] = set()
+        self._seen: set[str] = set()
+
+    @staticmethod
+    def _dedup_key(trade: dict) -> str:
+        tx = trade.get("transactionHash", "").strip()
+        if tx:
+            return tx
+        # Fallback : wallet + marché + timestamp (arrondi à la minute pour absorber
+        # les petites variations d'arrondi entre appels)
+        ts_min = int(trade.get("timestamp", 0)) // 60
+        return f"{trade.get('maker', '')}|{trade.get('conditionId', '')}|{ts_min}"
 
     async def scan(self) -> list[dict]:
-        """
-        Retourne les nouveaux gros trades depuis le dernier scan.
-        Chaque élément contient: wallet, montant, marché, side, prix.
-        """
         large_trades = await self.client.get_recent_large_trades(
             min_amount=settings.whale_threshold
         )
 
+        # Log brut à la première réponse non vide pour aider au debug
+        if large_trades:
+            sample = large_trades[0]
+            logger.debug(
+                f"[WHALE raw] keys={list(sample.keys())} "
+                f"tx={sample.get('transactionHash','<empty>')} "
+                f"title={sample.get('title','')[:40]}"
+            )
+
         new_events = []
         for trade in large_trades:
-            tx_id = trade.get("transactionHash", "")
-            if not tx_id or tx_id in self._seen_tx:
+            key = self._dedup_key(trade)
+            if key in self._seen:
                 continue
+            self._seen.add(key)
 
-            self._seen_tx.add(tx_id)
-
-            wallet = trade.get("maker", "")   # normalisé depuis proxyWallet
+            wallet = trade.get("maker", "")
             amount = float(trade.get("usdcSize", 0))
-            title  = trade.get("title", trade.get("conditionId", "???")[:16])
+            title  = trade.get("title", "") or trade.get("conditionId", "???")[:20]
 
             logger.info(
                 f"🐋 WHALE: {wallet[:10]}... "
                 f"${amount:,.0f} USDC | {trade.get('side')} | {title[:45]}"
             )
 
-            # Marque le wallet comme whale en DB s'il existe
             with get_db() as db:
                 w = db.get(TrackedWallet, wallet)
                 if w:
@@ -59,12 +72,11 @@ class WhaleTracker:
                 "token_id":     trade.get("asset", ""),
                 "side":         trade.get("side", "BUY"),
                 "price":        float(trade.get("price", 0)),
-                "tx_hash":      tx_id,
+                "tx_hash":      key,
                 "title":        title,
             })
 
-        # Limite la taille du set pour éviter une fuite mémoire
-        if len(self._seen_tx) > 10_000:
-            self._seen_tx = set(list(self._seen_tx)[-5_000:])
+        if len(self._seen) > 10_000:
+            self._seen = set(list(self._seen)[-5_000:])
 
         return new_events
