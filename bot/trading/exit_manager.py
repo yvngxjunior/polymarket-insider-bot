@@ -23,6 +23,8 @@ FIX EXIT-3 — guard trade.id is None dans _check_positions
 FIX EXIT-4 — _calc_pnl_usdc guard entry <= 0 → plus de ZeroDivisionError.
 FIX EXIT-5 — RESOLVING_THRESH_NO constante nommée pour la borne basse.
 FIX EXIT-6 — _should_exit guard entry_price <= 0 avant calcul pnl_pct.
+FIX EXIT-7 — pnl_usdc écrit dans CopiedTrade à chaque fermeture (partielle et totale).
+              Sans ce fix, performance.py.get_summary() retournait toujours PnL=0.
 """
 import asyncio
 from datetime import datetime
@@ -77,6 +79,8 @@ class ExitManager:
         self._task: Optional[asyncio.Task] = None
         # FIX BUG-2: rechargé depuis DB au démarrage
         self._partial_sold: dict[int, float] = {}
+        # FIX EXIT-7: PnL partiel accumulé par trade_id (pour le PnL final cumulatif)
+        self._partial_pnl: dict[int, float] = {}
         self._load_partial_sold()
 
     # ------------------------------------------------------------------
@@ -232,6 +236,7 @@ class ExitManager:
         FIX EXIT-1: filtre unifié DRY_RUN + LIVE via ~LIKE 'CLOSED%'.
         FIX EXIT-3: guard trade.id is None pour éviter KeyError sur _partial_sold.
         FIX EXIT-2: passe trade.side à _get_current_price().
+        FIX EXIT-7: écrit pnl_usdc dans CopiedTrade à chaque fermeture.
         """
         with get_db() as db:
             open_trades = (
@@ -304,8 +309,18 @@ class ExitManager:
             if is_partial:
                 remaining = round(trade.amount_usdc - sell_amount, 2)
                 self._partial_sold[trade.id] = remaining
+                self._partial_pnl[trade.id] = self._partial_pnl.get(trade.id, 0.0) + pnl
                 self._persist_partial(trade.id, remaining)
                 self.risk_manager.apply_pnl(pnl=pnl)
+
+                # FIX EXIT-7: écrit pnl_usdc partiel dans CopiedTrade
+                try:
+                    with get_db() as db:
+                        t = db.query(CopiedTrade).filter(CopiedTrade.id == trade.id).first()
+                        if t:
+                            t.pnl_usdc = self._partial_pnl[trade.id]
+                except Exception as e:
+                    logger.warning(f"[EXIT] Could not write partial pnl_usdc: {e}")
 
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                 await self.notifier.send(
@@ -321,24 +336,32 @@ class ExitManager:
                 )
 
             else:
-                self.risk_manager.release_position(trade.token_id, pnl=pnl)
+                # PnL total = PnL partiel accumulé (TP1 si applicable) + PnL de cette fermeture
+                accrued_pnl = self._partial_pnl.pop(trade.id, 0.0)
+                total_pnl = accrued_pnl + pnl
+
+                self.risk_manager.release_position(trade.token_id, pnl=total_pnl)
                 was_partial = trade.id in self._partial_sold
                 self._partial_sold.pop(trade.id, None)
 
                 with get_db() as db:
                     t = db.query(CopiedTrade).filter(CopiedTrade.id == trade.id).first()
                     if t:
+                        # FIX EXIT-7: écrit le PnL total dans CopiedTrade.pnl_usdc
+                        # C'est cette valeur que performance.py.get_summary() lit
+                        # pour calculer le vrai win_rate et total_pnl_usdc
+                        t.pnl_usdc = total_pnl
                         t.skip_reason = (
                             f"CLOSED{'(TP1+TP2)' if was_partial else ''}: "
-                            f"{reason} | PnL {pnl:+.2f}"
+                            f"{reason} | PnL {total_pnl:+.2f}"
                         )
 
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
                 await self.notifier.send(
                     f"📤 <b>Position {'Closed' if not settings.dry_run else 'Closed (DRY RUN)'}</b>\n"
                     f"────────────────────\n"
                     f"📊 <i>{(trade.market_question or trade.token_id[:20])[:60]}</i>\n"
-                    f"{pnl_emoji} P&amp;L: <b>{pnl:+.2f} USDC</b>\n"
+                    f"{pnl_emoji} P&amp;L: <b>{total_pnl:+.2f} USDC</b>\n"
                     f"📈 Entry: {trade.price:.3f} → Exit: {current:.3f}\n"
                     f"📝 Trigger: {reason}\n"
                 )
