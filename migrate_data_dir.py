@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Migration Script: data/ Directory Structure
 ============================================
-Crée la structure optimisée data/ et migre la database existante.
+Cree la structure optimisee data/ et migre la database existante.
 
-Structure créée:
+Structure creee:
     data/
-    ├── cache/         ← API response cache (Redis backup)
-    ├── markets/       ← Market snapshots historiques
-    ├── wallets/       ← Wallet profiles & stats
-    ├── logs/          ← Logs rotatifs (optionnel)
-    ├── snapshots/     ← Portfolio snapshots pour analytics
-    └── polyinsider.db ← SQLite database
+    |-- cache/         <- API response cache (Redis backup)
+    |-- markets/       <- Market snapshots historiques
+    |-- wallets/       <- Wallet profiles & stats
+    |-- logs/          <- Logs rotatifs (optionnel)
+    |-- snapshots/     <- Portfolio snapshots pour analytics
+    +-- polyinsider.db <- SQLite database
 
 Usage:
     python migrate_data_dir.py
@@ -23,15 +24,15 @@ from pathlib import Path
 
 def migrate():
     """
-    Migre vers la structure data/ centralisée.
-    Non-destructive: ne fait rien si déjà migré.
+    Migre vers la structure data/ centralisee.
+    Non-destructive: ne fait rien si deja migre.
     """
     print("=" * 60)
     print("  Migration: data/ Directory Structure")
     print("=" * 60)
     print()
     
-    # ── Étape 1: Créer data/ ──────────────────────────────────────────────────────────
+    # -- Etape 1: Creer data/ -----------------------------------------------
     data_dirs = [
         "data",
         "data/cache",
@@ -43,33 +44,32 @@ def migrate():
     
     for dir_path in data_dirs:
         os.makedirs(dir_path, exist_ok=True)
-        print(f"✓ Created: {dir_path}/")
+        print(f"[OK] Created: {dir_path}/")
     
     print()
     
-    # ── Étape 2: Migrer polyinsider.db ─────────────────────────────────────────────────
+    # -- Etape 2: Migrer polyinsider.db -------------------------------------
     db_old = Path("polyinsider.db")
     db_new = Path("data/polyinsider.db")
     
     if db_old.exists():
         if db_new.exists():
-            print(f"⚠ Database already in data/ - skipping migration")
-            print(f"  (Delete {db_old} manually if migration is complete)")
+            print(f"[WARN] Database already in data/ - skipping migration")
+            print(f"       (Delete {db_old} manually if migration is complete)")
         else:
             shutil.move(str(db_old), str(db_new))
-            print(f"✓ Moved: polyinsider.db → data/polyinsider.db")
+            print(f"[OK] Moved: polyinsider.db -> data/polyinsider.db")
     elif db_new.exists():
-        print(f"✓ Database already migrated: data/polyinsider.db")
+        print(f"[OK] Database already migrated: data/polyinsider.db")
     else:
-        print(f"ℹ No database found (will be created on first run)")
+        print(f"[INFO] No database found (will be created on first run)")
     
     print()
     
-    # ── Étape 3: Créer README dans data/ ──────────────────────────────────────────────────
+    # -- Etape 3: Creer README dans data/ -----------------------------------
     readme_path = Path("data/README.md")
     if not readme_path.exists():
-        readme_content = """
-# data/ Directory Structure
+        readme_content = """# data/ Directory Structure
 
 Centralized data directory for better organization and performance.
 
@@ -77,12 +77,12 @@ Centralized data directory for better organization and performance.
 
 ```
 data/
-├── polyinsider.db     # SQLite database (trades, wallets, portfolio)
-├── cache/             # API response cache (Redis backup)
-├── markets/           # Market snapshots for historical analysis
-├── wallets/           # Wallet profiles & performance stats
-├── logs/              # Application logs (if file logging enabled)
-└── snapshots/         # Portfolio snapshots for analytics
+|-- polyinsider.db     # SQLite database (trades, wallets, portfolio)
+|-- cache/             # API response cache (Redis backup)
+|-- markets/           # Market snapshots for historical analysis
+|-- wallets/           # Wallet profiles & performance stats
+|-- logs/              # Application logs (if file logging enabled)
++-- snapshots/         # Portfolio snapshots for analytics
 ```
 
 ## Cache Policy
@@ -106,15 +106,16 @@ tar -czf polyinsider-backup-$(date +%Y%m%d).tar.gz data/
 tar -xzf polyinsider-backup-YYYYMMDD.tar.gz
 ```
 """.strip()
-        readme_path.write_text(readme_content)
-        print(f"✓ Created: data/README.md")
+        # FIX: Specify UTF-8 encoding for Windows compatibility
+        readme_path.write_text(readme_content, encoding='utf-8')
+        print(f"[OK] Created: data/README.md")
     
     print()
     
-    # ── Étape 4: Instructions post-migration ──────────────────────────────────────────────────
-    print("─" * 60)
+    # -- Etape 4: Instructions post-migration -------------------------------
+    print("-" * 60)
     print("Migration Complete!")
-    print("─" * 60)
+    print("-" * 60)
     print()
     print("Next steps:")
     print("  1. Update .env:")
@@ -127,7 +128,7 @@ tar -xzf polyinsider-backup-YYYYMMDD.tar.gz
     print("  3. Restart the bot:")
     print("       python main.py")
     print()
-    print("✓ data/ structure ready!")
+    print("[OK] data/ structure ready!")
     print()
 
 
