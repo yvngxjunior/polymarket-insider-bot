@@ -1,30 +1,34 @@
-# ── Core async ──────────────────────────────────────────────
+# ── Core async ───────────────────────────────────────────
 aiohttp>=3.9.0
 
-# ── Config & validation ─────────────────────────────────────
+# ── Config & validation ───────────────────────────────────
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 
-# ── Polymarket ──────────────────────────────────────────────
+# ── Polymarket ──────────────────────────────────────────
 py-clob-client>=0.12.0
 
-# ── Database ────────────────────────────────────────────────
+# ── Database ────────────────────────────────────────────
 sqlalchemy>=2.0.0
 alembic>=1.13.0
 # FIX P1: PostgreSQL driver requis pour Phase 1 migration
 psycopg2-binary>=2.9.0
 
-# ── Notifications ───────────────────────────────────────────
+# ── Notifications ───────────────────────────────────────
 python-telegram-bot>=20.0
 
-# ── Logging ─────────────────────────────────────────────────
+# ── Logging ─────────────────────────────────────────────
 loguru>=0.7.0
 
-# ── HTTP & Retry ────────────────────────────────────────────
+# ── HTTP & Retry ────────────────────────────────────────
 requests>=2.31.0
 tenacity>=8.0.0
 httpx>=0.27.0
 
-# ── LLM Agent (optionnel — requis si LLM_ENABLED=true) ──────
+# ── FastAPI (Phase 1) ───────────────────────────────────
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# ── LLM Agent (optionnel — requis si LLM_ENABLED=true) ──────────
 openai>=1.0.0
