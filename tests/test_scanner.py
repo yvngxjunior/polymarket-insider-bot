@@ -189,7 +189,7 @@ async def test_refresher_start_triggers_immediate_refresh():
         mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
         refresher = WalletRefresher(
-            scanner=scanner, notifier=notifier, interval_minutes=999
+            scanner=scanner, notifier=notifier, interval_seconds=999  # FIX: était interval_minutes
         )
         await refresher.start()
         await asyncio.sleep(0.05)  # laisse le temps au task de s'exécuter
@@ -211,7 +211,7 @@ async def test_new_insider_triggers_notification():
         mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
         refresher = WalletRefresher(
-            scanner=scanner, notifier=notifier, interval_minutes=999
+            scanner=scanner, notifier=notifier, interval_seconds=999  # FIX: était interval_minutes
         )
         await refresher.start()
         await asyncio.sleep(0.05)
@@ -233,7 +233,7 @@ async def test_known_wallet_no_duplicate_notification():
         mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
         refresher = WalletRefresher(
-            scanner=scanner, notifier=notifier, interval_minutes=999
+            scanner=scanner, notifier=notifier, interval_seconds=999  # FIX: était interval_minutes
         )
         refresher._known_wallets.add("0xKnown")  # déjà connu
         await refresher.start()
@@ -261,7 +261,7 @@ async def test_consecutive_losses_synced_to_db():
         mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
         refresher = WalletRefresher(
-            scanner=scanner, notifier=notifier, interval_minutes=999
+            scanner=scanner, notifier=notifier, interval_seconds=999  # FIX: était interval_minutes
         )
         await refresher.start()
         await asyncio.sleep(0.05)
@@ -284,7 +284,7 @@ async def test_refresher_stop_cancels_task():
         mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
         refresher = WalletRefresher(
-            scanner=scanner, notifier=notifier, interval_minutes=999
+            scanner=scanner, notifier=notifier, interval_seconds=999  # FIX: était interval_minutes
         )
         await refresher.start()
         await asyncio.sleep(0.02)
