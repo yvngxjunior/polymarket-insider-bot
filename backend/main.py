@@ -1,4 +1,4 @@
-"FastAPI backend for PolyInsider Bot dashboard."
+"""FastAPI backend for PolyInsider Bot dashboard."""
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +9,7 @@ import sys
 bot_root = Path(__file__).parent.parent
 sys.path.insert(0, str(bot_root))
 
-from backend.app.routers import settings
+from backend.app.routers import settings, portfolio
 
 app = FastAPI(
     title="PolyInsider Bot API",
@@ -28,6 +28,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(settings.router)
+app.include_router(portfolio.router)
 
 
 @app.get("/")
@@ -38,7 +39,7 @@ async def root():
         "endpoints": [
             "/api/settings (GET, PUT)",
             "/api/portfolio (GET)",
-            "/api/trades (GET)",
+            "/api/positions (GET)",
             "/api/metrics (GET)",
         ],
     }
