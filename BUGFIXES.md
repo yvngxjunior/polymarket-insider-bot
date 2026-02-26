@@ -10,7 +10,7 @@
 
 ## Symptoms
 
-1. **Dashboard wallets empty** - Telegram `/wallets` shows 10 wallets but dashboard shows 0
+1. **Dashboard wallets empty** - Telegram `/status` shows "X wallets actifs" but dashboard shows 0
 2. **Trade history empty** - No trades showing in dashboard
 3. **No copy logs** - Missing "Would have buy..." in DRY_RUN mode
 
@@ -26,7 +26,7 @@ After migrating to `data/` structure, `bot/config.py` had no default value for `
 **Impact:**
 - Dashboard reads empty DB (no wallets, no trades)
 - Bot writes to correct DB (wallets tracked, trades recorded)
-- `/wallets` Telegram command works (uses bot's DB session)
+- `/status` Telegram command works (uses bot's DB session)
 - Frontend `/api/wallets` returns `[]` (uses API's DB session → wrong path)
 
 **Fix:**  
@@ -76,8 +76,8 @@ But logs were silent even when trades should be copied.
 
 **Root Cause:**  
 Two issues:
-1. `get_new_trades()` had minimal logging (only `logger.debug`)
-2. Type filter was case-sensitive: `if t.get("type") == "BUY"` but API sometimes returns `"BUY"` or `"buy"`
+1. **Logs insuffisants** : `get_new_trades()` had minimal logging (only `logger.debug`)
+2. **Type filter case-sensitive** : `if t.get("type") == "BUY"` but API sometimes returns `"BUY"` or `"buy"`
 
 **Fix:**  
 Added comprehensive debug logs in `bot/scanner/insider.py`:
@@ -102,6 +102,54 @@ if trade_type == "BUY":  # Case-insensitive now
 
 ---
 
+## Understanding Wallet Counts
+
+### Tracked Wallets vs Leaderboard Top 10
+
+**IMPORTANT:** Le dashboard montre **TOUS les wallets trackés**, pas seulement les 10 du top leaderboard.
+
+```python
+# bot/notifications/commands.py - /status command
+active_wallets = db.query(TrackedWallet).filter(
+    TrackedWallet.is_active == True
+).count()
+# → Compte TOUS les wallets actifs en DB
+```
+
+**Comportement normal :**
+
+1. **Au démarrage :**
+   - `tracked_wallets` table = vide (ou contient anciens wallets)
+   - Refresher démarre (intervalle 60s)
+
+2. **Après premier refresh (t=60s) :**
+   - Scan top 300 du leaderboard Polymarket
+   - Analyse chaque wallet (win rate, profit, etc.)
+   - Garde seulement les wallets "qualifiés" :
+     - Win rate ≥ 70%
+     - Avg profit ≥ $1
+     - Total trades ≥ 15
+   - INSERT dans `tracked_wallets` → typiquement **10-50 wallets**
+
+3. **Dashboard affiche :**
+   - `/api/wallets` → lit `tracked_wallets` table
+   - Retourne **tous** les wallets avec `is_active=true`
+   - Nombre affiché = nombre de wallets qualifiés (pas fixe à 10)
+
+**Exemple réel :**
+```bash
+# Telegram /status
+👥 Wallets actifs: 37  # ← TOUS les insiders qualifiés
+
+# Dashboard http://localhost:3000/wallets
+Showing 37 wallets  # ← Même nombre
+```
+
+**Si dashboard montre 0 mais Telegram montre 37 :**
+→ Bug DATABASE_URL (fixé dans ce PR)
+
+---
+
 ## How to Verify Fixes
 
 ### 1. Dashboard Wallets
@@ -123,11 +171,22 @@ python main.py
 INFO | [DB] Database initialized: data/polyinsider.db
 ```
 
-**Verify dashboard:**
+**Verify counts match:**
 ```bash
+# Telegram
+/status
+→ "👥 Wallets actifs: 37"
+
+# API
 curl http://localhost:8000/api/wallets | jq '.total_count'
-# Should match: /wallets Telegram command count
+→ 37
+
+# Dashboard
+http://localhost:3000/wallets
+→ "Showing 37 wallets"
 ```
+
+**✅ Tous les nombres doivent matcher !**
 
 ---
 
@@ -241,8 +300,8 @@ curl http://localhost:8000/api/wallets | jq
       ...
     }
   ],
-  "total_count": 10,
-  "active_count": 10
+  "total_count": 37,  # ← Tous les wallets qualifiés
+  "active_count": 37
 }
 ```
 
@@ -271,6 +330,41 @@ curl http://localhost:8000/api/wallets | jq
 
 ---
 
+## FAQ
+
+### Q: Pourquoi dashboard ne montre que 37 wallets alors que le refresher scan 300 ?
+
+**A:** Le refresher scan les **top 300 du leaderboard** mais ne garde que les wallets **qualifiés** :
+- Win rate ≥ 70%
+- Avg profit ≥ $1
+- Total trades ≥ 15
+- Pas en losing streak (< 5 pertes consécutives)
+
+Typiquement, seulement **10-50 wallets** passent les filtres.
+
+### Q: Comment ajouter un wallet spécifique manuellement ?
+
+**A:** Utilise la commande Telegram :
+```
+/whitelist 0xYourWalletAddress
+```
+
+Ou ajoute dans `.env` :
+```env
+WALLET_WHITELIST=0xWallet1,0xWallet2,0xWallet3
+```
+
+### Q: Le nombre de wallets change chaque refresh ?
+
+**A:** Oui, c'est normal :
+- **Nouveaux insiders** apparaissent dans le top 300 → ajoutés
+- **Losing streak** (5+ pertes) → désactivés (`is_active=false`)
+- **Pas assez de trades** récents → restent trackés mais inactifs
+
+Le nombre affiché dans `/status` et dashboard = wallets **actifs** uniquement.
+
+---
+
 ## Related Issues
 
 - #3 - Phase 2 Dashboard (PR)
@@ -287,6 +381,7 @@ curl http://localhost:8000/api/wallets | jq
 2. **API health endpoint**: Add `/api/health/db` to verify API → DB connection
 3. **Dashboard real-time**: WebSocket for instant updates (no 30s polling)
 4. **Trade simulation**: `/api/simulate` endpoint to test copy logic without waiting
+5. **Wallet history**: Track wallet activation/deactivation events
 
 ---
 
