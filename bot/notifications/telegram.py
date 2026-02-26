@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from bot.config import get_settings
 from bot.database import CopiedTrade, TradeStatus
@@ -29,6 +30,9 @@ class TelegramNotifier:
       - notify_arbitrage()     → opportunité arb Poly↔Kalshi
       - notify_llm_signal()    → recommandation GPT-4o-mini
       - notify_startup()       → démarrage du bot
+
+    FIX TELEGRAM-1: retry on TelegramError (timeout, 429 rate-limit)
+    FIX TELEGRAM-2: wallet[-6:] safe (checks len first)
     """
 
     def __init__(self) -> None:
@@ -38,7 +42,14 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     # Envoi brut
     # ------------------------------------------------------------------
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(TelegramError),
+        reraise=True,
+    )
     async def send(self, message: str) -> None:
+        """FIX TELEGRAM-1: retries 3x with exponential backoff on TelegramError."""
         try:
             await self._bot.send_message(
                 chat_id=self._chat_id,
@@ -48,6 +59,7 @@ class TelegramNotifier:
             )
         except TelegramError as e:
             logger.error(f"Telegram send failed: {e}")
+            raise  # tenacity will retry
 
     # ------------------------------------------------------------------
     # Trade copié
@@ -91,10 +103,15 @@ class TelegramNotifier:
         price: float,
     ) -> None:
         side_emoji = "🟢" if side.upper() == "BUY" else "🔴"
+        # FIX TELEGRAM-2: safe wallet slicing
+        wallet_short = wallet[:10] if len(wallet) >= 10 else wallet
+        wallet_end = wallet[-6:] if len(wallet) >= 6 else ""
+        wallet_display = f"{wallet_short}...{wallet_end}" if wallet_end else wallet_short
+
         msg = (
             f"🐋 <b>Whale Alert!</b>\n"
             f"────────────────────\n"
-            f"💼 Wallet: <code>{wallet[:10]}...{wallet[-6:]}</code>\n"
+            f"💼 Wallet: <code>{wallet_display}</code>\n"
             f"💰 Amount: <b>${amount_usdc:,.0f} USDC</b>\n"
             f"📊 Market: <i>{market_question[:80] or 'Unknown'}</i>\n"
             f"{side_emoji} Side: <b>{side}</b> @ {price:.3f}\n"
@@ -112,10 +129,15 @@ class TelegramNotifier:
         total_trades: int,
     ) -> None:
         label = get_score_label(score)
+        # FIX TELEGRAM-2: safe wallet slicing
+        wallet_short = wallet[:10] if len(wallet) >= 10 else wallet
+        wallet_end = wallet[-6:] if len(wallet) >= 6 else ""
+        wallet_display = f"{wallet_short}...{wallet_end}" if wallet_end else wallet_short
+
         msg = (
             f"🔍 <b>New Insider Detected</b>\n"
             f"────────────────────\n"
-            f"💼 Wallet: <code>{wallet[:10]}...{wallet[-6:]}</code>\n"
+            f"💼 Wallet: <code>{wallet_display}</code>\n"
             f"🎯 Score: <b>{score:.1f}/100</b> {label}\n"
             f"📈 Win Rate: <b>{win_rate:.0%}</b>\n"
             f"🔄 Trades: <b>{total_trades}</b>\n"
@@ -198,7 +220,6 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     async def notify_startup(self, dry_run: bool) -> None:
         mode = "🟡 DRY RUN" if dry_run else "🟢 LIVE"
-        # FIX: version corrigée (v2.4)
         msg = (
             f"🤖 <b>PolyInsider Bot v2.4 Started</b>\n"
             f"────────────────────\n"
