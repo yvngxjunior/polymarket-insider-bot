@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, String, Float, Boolean,
-    Integer, DateTime, Text, ForeignKey, Enum as SAEnum
+    Integer, DateTime, Text, ForeignKey, Enum as SAEnum, text
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker, Session
 from sqlalchemy.pool import NullPool
@@ -41,13 +41,11 @@ class TrackedWallet(Base):
     win_rate = Column(Float, default=0.0)
     total_trades = Column(Integer, default=0)
     total_profit_usd = Column(Float, default=0.0)
-    score = Column(Float, default=0.0)  # Score composite A/B/C/D
+    score = Column(Float, default=0.0)
     is_active = Column(Boolean, default=True)
     is_whale = Column(Boolean, default=False)
     first_seen = Column(DateTime, default=datetime.utcnow)
     last_activity = Column(DateTime, default=datetime.utcnow)
-    # FIX: colonnes manquantes — utilisées par main.py via getattr() mais
-    # jamais déclarées dans le modèle → données jamais persistées en base.
     consecutive_losses = Column(Integer, default=0)
     entry_timing_score = Column(Float, default=0.5)
 
@@ -66,7 +64,7 @@ class CopiedTrade(Base):
     market_id = Column(String(100))
     market_question = Column(Text, nullable=True)
     token_id = Column(String(100))
-    side = Column(String(4))  # BUY / SELL
+    side = Column(String(4))
     amount_usdc = Column(Float)
     price = Column(Float)
     status = Column(SAEnum(TradeStatus), default=TradeStatus.PENDING)
@@ -94,9 +92,35 @@ class WalletPerformance(Base):
     score = Column(Float)
 
 
+# Colonnes à ajouter si absentes (migration guardée, safe sur base existante)
+_SAFE_MIGRATIONS = [
+    ("tracked_wallets", "consecutive_losses", "INTEGER NOT NULL DEFAULT 0"),
+    ("tracked_wallets", "entry_timing_score", "REAL NOT NULL DEFAULT 0.5"),
+]
+
+
 def init_db() -> None:
-    """Crée toutes les tables si elles n'existent pas."""
+    """
+    Crée toutes les tables si elles n'existent pas.
+    Applique aussi les migrations ALTER TABLE sécurisées pour les colonnes
+    ajoutées sur des bases existantes (SQLite uniquement).
+    """
     Base.metadata.create_all(bind=engine)
+
+    # Migration guardée : ajoute les colonnes manquantes sans crash si elles existent déjà
+    if "sqlite" in settings.database_url:
+        with engine.connect() as conn:
+            for table, column, definition in _SAFE_MIGRATIONS:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+                    conn.commit()
+                    logger.info(f"[DB] Migration: {table}.{column} ajoutée")
+                except Exception as e:
+                    if "duplicate column" in str(e).lower():
+                        pass  # Colonne déjà présente, rien à faire
+                    else:
+                        logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
+
     logger.info("Database tables initialized.")
 
 
