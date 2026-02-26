@@ -72,7 +72,75 @@ class Settings(BaseSettings):
     whale_threshold: float = Field(default=500.0, ge=50.0)
     dry_run: bool = True
 
-    # ── Whale keyword filter (v2.5) ──────────────────────────────────────────────
+    # ── Capital ──────────────────────────────────────────────────────────────────
+    initial_capital: float = Field(
+        default=500.0,
+        ge=1.0,
+        description="Capital de départ en USDC. Utilisé comme fallback si la DB est vide.",
+    )
+
+    # ── Risk Management ──────────────────────────────────────────────────────────
+    max_position_pct: float = Field(default=0.10, ge=0.01, le=0.50)
+    max_price: float = Field(default=0.90, ge=0.50, le=0.99)
+    min_price: float = Field(default=0.05, ge=0.01, le=0.50)
+
+    max_positions: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Nombre maximum de positions ouvertes simultanément.",
+    )
+    daily_loss_limit_pct: float = Field(
+        default=0.15,
+        ge=0.01,
+        le=1.0,
+        description="Perte journalière max en % du capital avant de bloquer les trades. Ex: 0.15 = 15%%.",
+    )
+    drawdown_limit_pct: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=1.0,
+        description="Drawdown global max depuis le pic avant de bloquer les trades. Ex: 0.25 = 25%%.",
+    )
+    kelly_fraction: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=1.0,
+        description="Fraction Kelly appliquée (Quarter-Kelly = 0.25 par défaut).",
+    )
+    convergence_boost: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=3.0,
+        description="Multiplicateur de taille appliqué quand plusieurs insiders convergent.",
+    )
+
+    # ── Position Sizer ────────────────────────────────────────────────────────────
+    min_trade_usdc: float = Field(
+        default=2.0,
+        ge=0.5,
+        description="Montant minimum d'un trade en USDC (en dessous, le trade est ignoré).",
+    )
+    kelly_fraction_sizer: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=1.0,
+        description="Fraction Kelly pour PositionSizer (peut différer de kelly_fraction si besoin).",
+    )
+
+    # ── Conviction Filters ────────────────────────────────────────────────────────
+    min_source_bet_usdc: float = Field(default=50.0, ge=1.0,
+        description="Taille minimale du bet source pour être copié")
+    min_wallet_score: float = Field(default=0.65, ge=0.0, le=1.0,
+        description="Win rate minimum du wallet source")
+    max_consecutive_losses: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Nombre de pertes consécutives au-delà duquel un wallet est ignoré.",
+    )
+
+    # ── Whale keyword filter ──────────────────────────────────────────────────────
     whale_keywords_blacklist: str = Field(
         default="",
         description=(
@@ -82,36 +150,24 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ── Risk Management ──────────────────────────────────────────────────────────────
-    max_position_pct: float = Field(default=0.10, ge=0.01, le=0.50)
-    max_price: float = Field(default=0.90, ge=0.50, le=0.99)
-    min_price: float = Field(default=0.05, ge=0.01, le=0.50)
-
-    # ── Conviction Filters (v2.0) ───────────────────────────────────────────────
-    min_source_bet_usdc: float = Field(default=50.0, ge=1.0,
-        description="Taille minimale du bet source pour être copié")
-    min_wallet_score: float = Field(default=0.65, ge=0.0, le=1.0,
-        description="Win rate minimum du wallet source")
-
-    # ── Position Sizer (v2.7) ──────────────────────────────────────────────────────
+    # ── Position Sizer Tiered (v2.7) ──────────────────────────────────────────────
     tiered_multipliers: str = Field(
         default="",
         description=(
             "Multiplicateurs dégressifs selon la taille du trade source (CSV). "
-            "Format: \"min-max:mult,min+:mult\" (USD, insensible à la casse). "
-            "Exemple pour $500 de capital: "
-            "TIERED_MULTIPLIERS=1-50:1.0,50-500:0.3,500-5000:0.05,5000+:0.01. "
-            "Laisser vide pour Kelly pur sans multiplicateur (comportement précédent)."
+            "Format: \"min-max:mult,min+:mult\" (USD). "
+            "Exemple: TIERED_MULTIPLIERS=1-50:1.0,50-500:0.3,500-5000:0.05,5000+:0.01. "
+            "Laisser vide pour Kelly pur sans multiplicateur."
         ),
     )
 
-    # ── Arbitrage Cross-Platform (v2.0) ──────────────────────────────────────────────
+    # ── Arbitrage Cross-Platform ──────────────────────────────────────────────────
     arb_enabled: bool = Field(default=True,
         description="Active le scanner Polymarket vs Kalshi")
     arb_min_profit_pct: float = Field(default=0.03, ge=0.01, le=0.20,
         description="Profit minimum pour signaler une opportunité d'arb")
 
-    # ── Market Scanner (v2.0) ────────────────────────────────────────────────────────
+    # ── Market Scanner ────────────────────────────────────────────────────────────
     market_scan_enabled: bool = Field(default=True,
         description="Active le scan haute échelle (10k+ marchés)")
     market_scan_max_markets: int = Field(default=5000, ge=100, le=20000,
@@ -119,7 +175,7 @@ class Settings(BaseSettings):
     market_scan_every_n_loops: int = Field(default=100,
         description="Fréquence du market scan (toutes les N boucles)")
 
-    # ── LLM Agent (v2.0) — optionnel ────────────────────────────────────────────
+    # ── LLM Agent — optionnel ──────────────────────────────────────────────────────
     llm_enabled: bool = Field(default=False,
         description="Active l'agent GPT-4o-mini (nécessite OPENAI_API_KEY)")
     openai_api_key: Optional[str] = Field(default=None,
@@ -133,7 +189,7 @@ class Settings(BaseSettings):
     llm_top_markets: int = Field(default=5, ge=1, le=20,
         description="Nombre de marchés analysés par cycle LLM")
 
-    # ── Wallet Whitelist / Blacklist (v2.4) ───────────────────────────────────────────
+    # ── Wallet Whitelist / Blacklist ───────────────────────────────────────────────
     wallet_whitelist: str = Field(
         default="",
         description="CSV d'adresses toujours suivies (bypass filtres de score). Ex: 0xAAA,0xBBB",
@@ -143,7 +199,7 @@ class Settings(BaseSettings):
         description="CSV d'adresses jamais copiées. Ex: 0xCCC,0xDDD",
     )
 
-    # ── Health Monitor (v2.4) ────────────────────────────────────────────────────────
+    # ── Health Monitor ─────────────────────────────────────────────────────────────
     health_silence_threshold_min: int = Field(
         default=30,
         description="Minutes sans activité avant alerte Telegram",
@@ -157,7 +213,7 @@ class Settings(BaseSettings):
         description="Minutes minimum entre deux alertes de santé (anti-spam)",
     )
 
-    # ── Helpers ───────────────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────────
 
     def get_whitelist(self) -> set[str]:
         """Retourne la whitelist comme un set d'adresses en minuscules."""
@@ -174,9 +230,9 @@ class Settings(BaseSettings):
     def get_whale_keywords_blacklist(self) -> list[str]:
         """
         Retourne la liste de mots-clés à filtrer pour les Whale Alerts.
-        - Si WHALE_KEYWORDS_BLACKLIST=__none__ dans .env : filtre désactivé (liste vide)
-        - Si WHALE_KEYWORDS_BLACKLIST vide ou absent   : utilise DEFAULT_NOISE_KEYWORDS
-        - Sinon                                         : utilise les mots-clés fournis
+        - Si WHALE_KEYWORDS_BLACKLIST=__none__ dans .env : filtre désactivé
+        - Si vide ou absent                              : DEFAULT_NOISE_KEYWORDS
+        - Sinon                                          : mots-clés fournis
         """
         val = self.whale_keywords_blacklist.strip()
         if val == "__none__":

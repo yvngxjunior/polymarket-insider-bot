@@ -33,10 +33,8 @@ class TradeDecision:
 @dataclass
 class PortfolioState:
     """
-    FIX RISK-7: total_capital + peak_capital initialisés avec settings.initial_capital
-      au lieu de 500 hardcodé.
-      Si _load_from_db() échoue (1er run), le capital fallback est maintenant
-      celui configuré dans .env.
+    État du portefeuille.
+    Tous les defaults sont lus depuis settings (zéro hardcode).
     """
     total_capital: float = field(default_factory=lambda: settings.initial_capital)
     daily_pnl: float = 0.0
@@ -66,31 +64,19 @@ class PortfolioState:
 
 class RiskManager:
     """
-    Gestionnaire de risques v2 — Kelly Criterion + limites dynamiques.
+    Gestionnaire de risques — Kelly Criterion + limites dynamiques.
+    Toutes les constantes sont lues depuis settings (zéro hardcode).
 
-    FIX #1     — Capital persisté en DB (PortfolioSnapshot).
-    FIX #2     — open_positions persistées en DB : survit aux redémarrages.
-    FIX RISK-1 — _persist() : UPSERT portable SQLite + PostgreSQL.
-    FIX RISK-2 — _load_from_db() : robuste sur le type de daily_reset_date.
-    FIX RISK-3 — _kelly_sizing() : win_rate clampé dans [0, 1].
-    FIX RISK-4 — evaluate() : market_volume_usdc=0.0 par défaut.
-    FIX RISK-6 — _persist() : conn.commit() déplacé en dehors du if/else.
-      Avant: l'INSERT (première exécution) n'était jamais commité.
-      → capital initial perdu à chaque restart tant que la table était vide.
-      Après: conn.commit() appelé après UPDATE et INSERT.
-    FIX RISK-7 — PortfolioState : total_capital + peak_capital initialisés
-      avec settings.initial_capital au lieu de 500 hardcodé.
+    Paramètres configurables dans .env :
+      INITIAL_CAPITAL         Capital de départ (défaut: 500)
+      MAX_POSITIONS           Positions simultanées max (défaut: 10)
+      DAILY_LOSS_LIMIT_PCT    Perte journalière max % (défaut: 0.15)
+      DRAWDOWN_LIMIT_PCT      Drawdown max depuis le pic % (défaut: 0.25)
+      KELLY_FRACTION          Fraction Kelly (défaut: 0.25 = Quarter-Kelly)
+      CONVERGENCE_BOOST       Multiplicateur convergence (défaut: 1.5)
     """
 
-    MAX_POSITIONS = 10
-    DAILY_LOSS_LIMIT_PCT = 0.15
-    DRAWDOWN_LIMIT_PCT = 0.25
-    KELLY_FRACTION = 0.25
-    CONVERGENCE_BOOST = 1.5
-
     def __init__(self, initial_capital: float | None = None):
-        # FIX RISK-7: si initial_capital n'est pas fourni, PortfolioState
-        # utilisera settings.initial_capital comme fallback.
         if initial_capital is None:
             initial_capital = settings.initial_capital
         self._open_positions: set[str] = set()
@@ -139,7 +125,7 @@ class RiskManager:
             logger.warning(f"[RISK] Could not load from DB (first run?): {e}")
 
     def _persist(self) -> None:
-        """FIX RISK-6: conn.commit() appelé après UPDATE et INSERT."""
+        """UPSERT portable SQLite + PostgreSQL. conn.commit() après UPDATE et INSERT."""
         try:
             from bot.database import engine
             csv = ",".join(self._open_positions)
@@ -199,12 +185,12 @@ class RiskManager:
         if market_volume_usdc > 0 and market_volume_usdc < 1_000:
             return TradeDecision(False, 0, RejectReason.LOW_LIQUIDITY.value)
 
-        daily_loss_limit = -self.portfolio.total_capital * self.DAILY_LOSS_LIMIT_PCT
+        daily_loss_limit = -self.portfolio.total_capital * settings.daily_loss_limit_pct
         if self.portfolio.daily_pnl <= daily_loss_limit:
             return TradeDecision(False, 0, RejectReason.DAILY_LOSS_LIMIT.value)
-        if self.portfolio.drawdown_pct >= self.DRAWDOWN_LIMIT_PCT:
+        if self.portfolio.drawdown_pct >= settings.drawdown_limit_pct:
             return TradeDecision(False, 0, RejectReason.DRAWDOWN.value)
-        if len(self._open_positions) >= self.MAX_POSITIONS:
+        if len(self._open_positions) >= settings.max_positions:
             return TradeDecision(False, 0, RejectReason.MAX_POSITIONS.value)
         if token_id in self._open_positions:
             return TradeDecision(False, 0, RejectReason.DUPLICATE.value)
@@ -212,13 +198,12 @@ class RiskManager:
         kelly_fraction = self._kelly_sizing(win_rate=wallet_win_rate, price=price)
         kelly_amount = round_usdc(self.portfolio.total_capital * kelly_fraction)
 
-        # FIX CONV-3: convergence boost x1.5 appliqué si is_convergence_signal=True
         if is_convergence_signal:
-            kelly_amount = round_usdc(kelly_amount * self.CONVERGENCE_BOOST)
-            logger.info(f"🔥 Convergence boost applied: x{self.CONVERGENCE_BOOST}")
+            kelly_amount = round_usdc(kelly_amount * settings.convergence_boost)
+            logger.info(f"🔥 Convergence boost applied: x{settings.convergence_boost}")
 
         final_amount = round_usdc(min(kelly_amount, settings.max_trade_amount))
-        if final_amount < 1.0:
+        if final_amount < settings.min_trade_usdc:
             return TradeDecision(False, 0, RejectReason.AMOUNT_TOO_SMALL.value)
 
         return TradeDecision(
@@ -233,7 +218,7 @@ class RiskManager:
             return 0.01
         b = (1 - price) / price
         full_kelly = (win_rate * (b + 1) - 1) / b
-        quarter_kelly = max(0, full_kelly * self.KELLY_FRACTION)
+        quarter_kelly = max(0, full_kelly * settings.kelly_fraction)
         return min(quarter_kelly, settings.max_position_pct)
 
     def register_position(self, token_id: str) -> None:
