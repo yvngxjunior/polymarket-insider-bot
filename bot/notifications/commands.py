@@ -1,5 +1,5 @@
 """
-Commandes Telegram interactives — PolyInsider Bot v2.5
+Commandes Telegram interactives — PolyInsider Bot v2.6
 =======================================================
 Permet de contrôler le bot depuis Telegram sans toucher au serveur.
 
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from telegram import Update
@@ -147,12 +147,9 @@ class BotCommandHandler:
             ).count()
 
         # FIX BUG-4: utilise l'API publique de RiskManager — portfolio.total_capital
-        # L'ancienne version cherchait _available_capital et _exposed_capital
-        # qui n'existent pas → affichait toujours $0.00 / $0.00.
         portfolio    = self.risk_manager.portfolio
         total_cap    = portfolio.total_capital
         n_open       = len(self.risk_manager._open_positions)
-        # Estimation du capital exposé: n_positions × taille moyenne par position
         avg_pos_size = settings.max_trade_amount
         exposed_est  = min(n_open * avg_pos_size, total_cap)
         available    = max(0.0, total_cap - exposed_est)
@@ -186,8 +183,6 @@ class BotCommandHandler:
         pnl_emoji    = "🟢" if total_pnl >= 0 else "🔴"
 
         # FIX BUG-5: daily_pnl lu depuis RiskManager.portfolio (source de vérité)
-        # L'ancienne version lisait une colonne pnl_usdc inexistante sur CopiedTrade
-        # → affichait toujours $0.00 pour le P&L du jour.
         today_pnl   = self.risk_manager.portfolio.daily_pnl
         today_emoji = "🟢" if today_pnl >= 0 else "🔴"
 
@@ -279,9 +274,6 @@ class BotCommandHandler:
             return
         address = args[0].strip().lower()
 
-        # FIX BUG-6: persist via is_active=True en DB ET log l'instruction .env
-        # L'ancien setattr(wallet, 'whitelisted', True) écrivait sur un attribut
-        # Python volatil non mappé SQLAlchemy → perdu au redémarrage.
         with get_db() as db:
             wallet = db.get(TrackedWallet, address)
             if wallet:
@@ -318,7 +310,6 @@ class BotCommandHandler:
             return
         address = args[0].strip().lower()
 
-        # FIX BUG-6: désactive en DB + instruction .env pour la persistance
         with get_db() as db:
             wallet = db.get(TrackedWallet, address)
             if wallet:

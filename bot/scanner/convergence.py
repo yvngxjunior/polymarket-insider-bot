@@ -1,6 +1,5 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Optional
 
 from bot.database import get_db, TrackedWallet
@@ -128,7 +127,6 @@ class ConvergenceDetector:
         try:
             with get_db() as db:
                 wallets = [db.get(TrackedWallet, addr) for addr in wallet_addresses]
-                # score est déjà dans [0, 1] — pas de division par 100
                 scores = [w.score for w in wallets if w is not None and w.score is not None]
             return sum(scores) / len(scores) if scores else 0.5
         except Exception:

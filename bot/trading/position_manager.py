@@ -1,7 +1,5 @@
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 from bot.config import get_settings
 from bot.trading.polymarket import PolymarketDataClient
