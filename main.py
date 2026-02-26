@@ -35,7 +35,10 @@ v2.7 fixes:
   - FIX PM-1  position_manager: rechargement DB au démarrage + fallback is_open()
   - FIX CONV-1/2  timestamp ms→s + safe_float sur amount/price
   - FIX ENGINE-4  appels CLOB sync wrappés dans run_in_executor
+  - FIX ENGINE-5  order book réel + slicing avant chaque BUY
   - FIX MAIN-1  whale scan throttlé à toutes les 4 boucles (~12s)
+  - FIX SIZER-1  TIERED_MULTIPLIERS dégressifs configurable via .env
+  - FEAT SIZER-2  /setcapital hot-reload sizer (sizer injecté dans BotCommandHandler)
 """
 import asyncio
 import signal
@@ -216,8 +219,6 @@ async def main_loop(
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
-    # FIX MAIN-1: whale scan throttlé — toutes les 4 boucles (~12s avec scan_interval=3s)
-    # L'API /trades ne se rafraîchit pas toutes les 3s -> polling inutile + logs pollus.
     WHALE_EVERY  = 4
     ARB_EVERY    = 20
     MARKET_EVERY = settings.market_scan_every_n_loops
@@ -366,6 +367,11 @@ async def run() -> None:
     logger.info("  Health monitor:           ON 🟩")
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
+    # FEAT SIZER-2: log tiered multipliers au démarrage
+    if settings.tiered_multipliers:
+        logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
+    else:
+        logger.info("  Tiered multipliers:       OFF (Kelly pur) — /setcapital pour activer")
     if settings.wallet_whitelist:
         logger.info(f"  Whitelist: {len(settings.get_whitelist())} wallets")
     if settings.wallet_blacklist:
@@ -403,10 +409,12 @@ async def run() -> None:
         check_interval_sec=settings.health_check_interval_sec,
         alert_cooldown_min=settings.health_alert_cooldown_min,
     )
+    # FEAT SIZER-2: sizer injecté → /setcapital hot-reload sans redémarrage
     cmd_handler = BotCommandHandler(
         notifier=notifier,
         risk_manager=risk_manager,
         performance_tracker=performance_tracker,
+        sizer=sizer,
     )
 
     wallet_scanner = WalletScanner(
