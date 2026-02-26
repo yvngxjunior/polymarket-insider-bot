@@ -17,6 +17,10 @@ FIX BUG-2 — _partial_sold persisté en DB (colonne tp1_remaining sur CopiedTra
   Au démarrage, _load_partial_sold() recharge l'état → survit aux redémarrages.
 FIX BUG-3 (M3) — filtre SQL exclut désormais les positions déjà CLOSED pour éviter
   les tentatives de re-fermeture inutiles à chaque cycle.
+FIX EXIT-1 — filtre _check_positions() unifié DRY_RUN + LIVE :
+  ~skip_reason.like('CLOSED%') couvre DRY_RUN, TP1_REMAINING et tx_hash réels.
+  Avant: filtre DRY_RUN séparé perdait les trades après TP1 partiel
+  (skip_reason réécrit en 'TP1_REMAINING:XX' → plus dans IN ['DRY_RUN']).
 """
 import asyncio
 from datetime import datetime
@@ -208,26 +212,19 @@ class ExitManager:
     # ------------------------------------------------------------------
 
     async def _check_positions(self) -> None:
-        # FIX BUG-3 (M3): exclut les positions déjà CLOSED pour éviter
-        # les tentatives de re-fermeture inutiles à chaque cycle.
-        # "skip_reason LIKE 'CLOSED%'" couvre CLOSED, CLOSED(TP1+TP2), etc.
-        if settings.dry_run:
-            filter_cond = (
-                CopiedTrade.skip_reason.in_(["DRY_RUN"])
-                | CopiedTrade.skip_reason.like("TP1_REMAINING:%")
-            )
-        else:
-            filter_cond = (
-                (CopiedTrade.tx_hash != None)  # noqa: E711
-                & ~CopiedTrade.skip_reason.like("CLOSED%")
-            )
-
+        # FIX EXIT-1 — filtre unifié DRY_RUN + LIVE.
+        # Avant: deux branches séparées → les trades DRY_RUN après TP1
+        # (skip_reason réécrit en 'TP1_REMAINING:XX') tombaient hors du
+        # filtre IN ['DRY_RUN'] et n'étaient plus surveillés pour TP2/SL.
+        # Après: ~LIKE 'CLOSED%' couvre tous les cas (DRY_RUN, TP1_REMAINING,
+        # tx_hash réel) sans distinction. La logique DRY_RUN reste dans les
+        # actions (settings.dry_run), pas dans la sélection SQL.
         with get_db() as db:
             open_trades = (
                 db.query(CopiedTrade)
                 .filter(
                     CopiedTrade.status == TradeStatus.EXECUTED,
-                    filter_cond,
+                    ~CopiedTrade.skip_reason.like("CLOSED%"),
                 )
                 .all()
             )
