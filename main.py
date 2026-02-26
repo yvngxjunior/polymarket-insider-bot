@@ -1,5 +1,5 @@
 """
-PolyInsider Bot v2.9
+PolyInsider Bot v3.1
 =====================
 Architecture 7 phases + 3 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
@@ -22,7 +22,7 @@ v2.8 fixes:
 v2.9 fixes:
   - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
   - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
-  - FIX RISK-6     INSERT portfolio_snapshot jamais commité
+  - FIX RISK-6     INSERT portfolio_snapshot jamais commitié
   - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
   - FIX FILTER-1   rate-limit query status case-sensitive
 
@@ -31,6 +31,11 @@ v3.0 fixes (audit lot 1):
   - FIX MAIN-5     convergence.process_trade logger.debug → logger.warning
   - FIX MAIN-6     _open_positions accès privé → open_positions_count() public
   - FIX MAIN-7     aiohttp.ClientSession LLM recréé chaque cycle → session unique
+
+v3.1 fixes (pré-SaaS):
+  - FIX ENGINE-9   _http_session partagée dans TradingEngine (plus de new session/appel)
+  - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL (IF NOT EXISTS)
+  - FIX MAIN-8     engine.close() dans asyncio.gather shutdown
 """
 import asyncio
 import signal
@@ -367,7 +372,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v2.9")
+    logger.info("  PolyInsider Bot v3.1")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -484,12 +489,14 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
 
+    # FIX MAIN-8: engine.close() ajouté pour fermer la session HTTP partagée
     await asyncio.gather(
         refresher.stop(),
         exit_manager.stop(),
         health_monitor.stop(),
         cmd_handler.stop(),
         client.close(),
+        engine.close(),
         arbitrage_scanner.close(),
         market_scanner.close(),
         llm_agent.close(),

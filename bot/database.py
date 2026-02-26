@@ -67,7 +67,7 @@ class CopiedTrade(Base):
     side = Column(String(4))
     amount_usdc = Column(Float)
     price = Column(Float)
-    # FIX DB-2: pnl_usdc manquant — requis par performance.py pour le vrai P&L
+    # FIX DB-2: pnl_usdc requis par performance.py pour le vrai P&L
     # Mis à jour par ExitManager à la clôture de la position (TP1/TP2/SL/RESOLVING)
     pnl_usdc = Column(Float, nullable=True, default=None)
     status = Column(SAEnum(TradeStatus), default=TradeStatus.PENDING)
@@ -114,13 +114,44 @@ class PortfolioSnapshot(Base):
 
 
 # Colonnes à ajouter si absentes (migration safe sur base existante)
+# FIX DB-3: support SQLite ET PostgreSQL
+# - SQLite  : ALTER TABLE t ADD COLUMN c def  (sans IF NOT EXISTS, on catch 'duplicate column')
+# - PostgreSQL: ALTER TABLE t ADD COLUMN IF NOT EXISTS c def  (natif depuis PG 9.6)
 _SAFE_MIGRATIONS = [
-    ("tracked_wallets",  "consecutive_losses", "INTEGER NOT NULL DEFAULT 0"),
-    ("tracked_wallets",  "entry_timing_score", "REAL NOT NULL DEFAULT 0.5"),
-    ("portfolio_snapshot", "open_positions_csv", "TEXT NOT NULL DEFAULT ''"),
-    # FIX DB-2: pnl_usdc ajouté pour le vrai P&L dans performance.py
-    ("copied_trades",    "pnl_usdc",           "REAL"),
+    ("tracked_wallets",    "consecutive_losses",  "INTEGER NOT NULL DEFAULT 0"),
+    ("tracked_wallets",    "entry_timing_score",  "REAL NOT NULL DEFAULT 0.5"),
+    ("portfolio_snapshot", "open_positions_csv",  "TEXT NOT NULL DEFAULT ''"),
+    ("copied_trades",      "pnl_usdc",            "REAL"),
 ]
+
+
+def _run_safe_migrations(conn, is_postgres: bool) -> None:
+    """
+    FIX DB-3: exécute les migrations ALTER TABLE sur SQLite ET PostgreSQL.
+    PostgreSQL utilise 'ADD COLUMN IF NOT EXISTS' (PG >= 9.6).
+    SQLite utilise 'ADD COLUMN' avec catch de 'duplicate column'.
+    """
+    for table, column, definition in _SAFE_MIGRATIONS:
+        try:
+            if is_postgres:
+                # PostgreSQL: IF NOT EXISTS natif, pas d'exception sur doublon
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
+                ))
+                conn.commit()
+                logger.debug(f"[DB] PG migration OK: {table}.{column}")
+            else:
+                # SQLite: pas de IF NOT EXISTS, on catch 'duplicate column'
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
+                conn.commit()
+                logger.info(f"[DB] Migration: {table}.{column} ajoutée")
+        except Exception as e:
+            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                pass  # colonne déjà présente — normal
+            else:
+                logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
 
 
 def init_db() -> None:
@@ -129,21 +160,16 @@ def init_db() -> None:
     Applique aussi les migrations ALTER TABLE sécurisées.
 
     FIX DB-1 — Seed portfolio_snapshot row id=1 compatible SQLite + PostgreSQL.
+    FIX DB-3 — Migrations sur SQLite ET PostgreSQL.
     """
     Base.metadata.create_all(bind=engine)
 
-    if "sqlite" in settings.database_url:
-        with engine.connect() as conn:
-            for table, column, definition in _SAFE_MIGRATIONS:
-                try:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
-                    conn.commit()
-                    logger.info(f"[DB] Migration: {table}.{column} ajoutée")
-                except Exception as e:
-                    if "duplicate column" in str(e).lower():
-                        pass
-                    else:
-                        logger.warning(f"[DB] Migration {table}.{column} inattendue: {e}")
+    # FIX DB-3: détection du dialecte
+    db_url = settings.database_url.lower()
+    is_postgres = "postgresql" in db_url or "postgres" in db_url
+
+    with engine.connect() as conn:
+        _run_safe_migrations(conn, is_postgres=is_postgres)
 
     # FIX DB-1 — Seed de la row portfolio_snapshot si absente
     today = date.today().isoformat()

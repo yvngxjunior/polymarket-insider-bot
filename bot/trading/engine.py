@@ -36,11 +36,14 @@ class TradingEngine:
     FIX ENGINE-6: slash manquant dans l'URL /book (404 silencieux).
     FIX ENGINE-7: close_position passait shares au lieu d'USDC au CLOB.
     FIX ENGINE-8: guard source_amount <= 0 avant tout ordre.
+    FIX ENGINE-9: _http_session partagée (plus de new ClientSession() à chaque appel).
     """
 
     def __init__(self, risk_manager: RiskManager):
         self.risk = risk_manager
         self._client: Optional[ClobClient] = None
+        # FIX ENGINE-9: session HTTP unique, créée lazy, réutilisée sur toute la durée de vie
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
     def _get_client(self) -> ClobClient:
         if self._client is None:
@@ -56,6 +59,20 @@ class TradingEngine:
                 logger.error(f"[ENGINE] ClobClient init failed: {e}")
                 raise
         return self._client
+
+    def _get_http_session(self) -> aiohttp.ClientSession:
+        """FIX ENGINE-9: session HTTP partagée, créée une seule fois."""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=5)
+            )
+        return self._http_session
+
+    async def close(self) -> None:
+        """Fermeture propre de la session HTTP au shutdown."""
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+            logger.debug("[ENGINE] HTTP session closed.")
 
     async def _clob_submit(
         self, order_args: MarketOrderArgs
@@ -74,7 +91,7 @@ class TradingEngine:
         return response
 
     # ------------------------------------------------------------------
-    # FIX ENGINE-5 + ENGINE-6: order book réel
+    # FIX ENGINE-5 + ENGINE-6 + ENGINE-9: order book réel, session partagée
     # ------------------------------------------------------------------
 
     async def _fetch_best_ask(
@@ -83,20 +100,19 @@ class TradingEngine:
         """
         Récupère le meilleur ask disponible sur le CLOB pour token_id.
         Retourne (price, size_usd) ou None si indisponible.
+        FIX ENGINE-9: utilise self._get_http_session() au lieu d'une new session.
         """
         url = f"{settings.polymarket_host}/book?token_id={token_id}"
         try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        logger.debug(
-                            f"[ENGINE] _fetch_best_ask HTTP {resp.status} "
-                            f"for {token_id[:16]}..."
-                        )
-                        return None
-                    data = await resp.json()
+            session = self._get_http_session()
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.debug(
+                        f"[ENGINE] _fetch_best_ask HTTP {resp.status} "
+                        f"for {token_id[:16]}..."
+                    )
+                    return None
+                data = await resp.json()
 
             asks = data.get("asks") or []
             if not asks:
