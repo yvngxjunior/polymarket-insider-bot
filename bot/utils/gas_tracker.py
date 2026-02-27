@@ -1,16 +1,15 @@
-"""Polygon gas price tracker using Polygonscan API."""
+"""Polygon gas price tracker using direct RPC call."""
 import aiohttp
 import asyncio
+import time
 from typing import Optional
 from bot.utils.logger import logger
 
 class GasTracker:
-    """Track Polygon gas prices in real-time"""
+    """Track Polygon gas prices via RPC"""
     
-    POLYGONSCAN_API = "https://api.polygonscan.com/api"
-    
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key  # Optional, works without key (limited rate)
+    def __init__(self, rpc_url: str = "https://polygon-rpc.com"):
+        self.rpc_url = rpc_url
         self.session: Optional[aiohttp.ClientSession] = None
         self._cached_gas_price: int = 35
         self._last_update: float = 0
@@ -21,13 +20,12 @@ class GasTracker:
         return self.session
     
     async def get_gas_price(self) -> int:
-        """Fetch current Polygon gas price in gwei.
+        """Fetch current Polygon gas price in gwei via eth_gasPrice RPC call.
         
         Returns:
             Gas price in gwei (integer)
         """
         try:
-            import time
             now = time.time()
             
             # Cache for 10 seconds
@@ -35,27 +33,36 @@ class GasTracker:
                 return self._cached_gas_price
             
             session = await self._get_session()
-            params = {
-                "module": "gastracker",
-                "action": "gasoracle"
-            }
-            if self.api_key:
-                params["apikey"] = self.api_key
             
-            async with session.get(self.POLYGONSCAN_API, params=params, timeout=5) as resp:
+            # Direct RPC call: eth_gasPrice
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_gasPrice",
+                "params": [],
+                "id": 1
+            }
+            
+            async with session.post(
+                self.rpc_url, 
+                json=payload, 
+                timeout=aiohttp.ClientTimeout(total=3)
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get("status") == "1":
-                        result = data.get("result", {})
-                        # Polygonscan returns SafeGasPrice (standard speed)
-                        gas_price = int(float(result.get("SafeGasPrice", 35)))
-                        self._cached_gas_price = gas_price
-                        self._last_update = now
-                        return gas_price
+                    # Response is hex wei, convert to gwei
+                    gas_price_wei = int(data.get("result", "0x0"), 16)
+                    gas_price_gwei = gas_price_wei // 1_000_000_000
+                    
+                    self._cached_gas_price = gas_price_gwei
+                    self._last_update = now
+                    return gas_price_gwei
             
             logger.warning("[GasTracker] Failed to fetch, using cached")
             return self._cached_gas_price
             
+        except asyncio.TimeoutError:
+            logger.warning("[GasTracker] Timeout")
+            return self._cached_gas_price
         except Exception as e:
             logger.error(f"[GasTracker] Error: {e}")
             return self._cached_gas_price
@@ -67,8 +74,8 @@ class GasTracker:
 # Singleton
 _gas_tracker: Optional[GasTracker] = None
 
-def get_gas_tracker() -> GasTracker:
+def get_gas_tracker(rpc_url: str = "https://polygon-rpc.com") -> GasTracker:
     global _gas_tracker
     if _gas_tracker is None:
-        _gas_tracker = GasTracker()
+        _gas_tracker = GasTracker(rpc_url)
     return _gas_tracker
