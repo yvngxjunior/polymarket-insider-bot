@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from bot.database import init_db
 from bot.utils.logger import logger
 
-from api.routes import positions, portfolio, trades, wallets, health
+from api.routes import positions, portfolio, trades, wallets, health, dashboard
 
 
 @asynccontextmanager
@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # TODO: restrict to frontend domain in prod
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -55,6 +55,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # Register routes
 app.include_router(health.router, tags=["Health"])
+app.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
 app.include_router(positions.router, prefix="/api", tags=["Positions"])
 app.include_router(portfolio.router, prefix="/api", tags=["Portfolio"])
 app.include_router(trades.router, prefix="/api", tags=["Trades"])
