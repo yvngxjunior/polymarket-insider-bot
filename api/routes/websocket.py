@@ -1,12 +1,13 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import List
 import asyncio
-import json
 from datetime import datetime
 from sqlalchemy import desc
 
 from bot.database import SessionLocal, TrackedWallet, CopiedTrade, PortfolioSnapshot
 from bot.utils.logger import logger
+from bot.utils.gas_tracker import get_gas_tracker
+from bot.utils.rpc_monitor import get_rpc_monitor
 
 router = APIRouter()
 
@@ -26,22 +27,11 @@ class ConnectionManager:
             pass
         logger.info(f"[WS] Client disconnected. Total: {len(self.active_connections)}")
 
-    async def broadcast(self, message: dict):
-        """Send message to all connected clients"""
-        disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except:
-                disconnected.append(connection)
-        
-        for conn in disconnected:
-            try:
-                self.active_connections.remove(conn)
-            except:
-                pass
-
 manager = ConnectionManager()
+
+# Initialize monitors
+gas_tracker = get_gas_tracker()
+rpc_monitor = get_rpc_monitor("https://polygon-rpc.com")  # Use your Infura/Alchemy URL
 
 @router.websocket("/ws/dashboard")
 async def websocket_dashboard(websocket: WebSocket):
@@ -67,10 +57,20 @@ async def websocket_dashboard(websocket: WebSocket):
                 ).first()
                 last_trade_ts = int(last_trade.created_at.timestamp()) if last_trade else int(now.timestamp()) - 3600
                 
-                # Mock RPC/Gas (TODO: real monitoring)
-                import random
-                rpc_latency = random.randint(38, 55)  # Simulate variation
-                gas_price = random.randint(30, 45)
+                # REAL DATA: Fetch gas price and RPC latency
+                gas_price_task = asyncio.create_task(gas_tracker.get_gas_price())
+                rpc_latency_task = asyncio.create_task(rpc_monitor.ping())
+                
+                # Wait for both with timeout
+                try:
+                    gas_price, rpc_latency = await asyncio.wait_for(
+                        asyncio.gather(gas_price_task, rpc_latency_task),
+                        timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[WS] Monitor timeout, using defaults")
+                    gas_price = 35
+                    rpc_latency = 50
                 
                 # Build update message
                 update = {
