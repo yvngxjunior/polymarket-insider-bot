@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime
 
 from bot.config import get_settings
-from bot.database import get_db, TrackedWallet, Trade, Position
+from bot.database import get_db, TrackedWallet, CopiedTrade, PortfolioSnapshot
 from bot.analytics.backtest import BacktestEngine
 from bot.utils.logger import logger
 
@@ -71,65 +71,65 @@ async def get_portfolio() -> Dict[str, Any]:
     """Get current portfolio summary"""
     with get_db() as db:
         # Get total capital from latest snapshot
-        from bot.database import PortfolioSnapshot
         latest_snapshot = (
             db.query(PortfolioSnapshot)
-            .order_by(PortfolioSnapshot.timestamp.desc())
+            .order_by(PortfolioSnapshot.updated_at.desc())
             .first()
         )
         
         total_capital = (
             float(latest_snapshot.total_capital)
             if latest_snapshot
-            else settings.initial_capital
+            else 500.0
         )
         
-        # Get open positions count
-        open_positions = db.query(Position).filter(
-            Position.status == "OPEN"
-        ).count()
-        
-        # Calculate total PnL from closed positions
-        closed_trades = db.query(Trade).filter(
-            Trade.pnl_usdc.isnot(None)
+        # Calculate total PnL from closed trades
+        closed_trades = db.query(CopiedTrade).filter(
+            CopiedTrade.pnl_usdc.isnot(None)
         ).all()
         
         total_pnl = sum(float(t.pnl_usdc) for t in closed_trades if t.pnl_usdc)
+        initial_capital = float(latest_snapshot.total_capital) - total_pnl if latest_snapshot else 500.0
         
     return {
         "total_capital": round(total_capital, 2),
-        "initial_capital": settings.initial_capital,
+        "initial_capital": round(initial_capital, 2),
         "total_pnl": round(total_pnl, 2),
-        "open_positions": open_positions,
+        "open_positions": 0,  # TODO: track open positions properly
         "return_pct": round(
-            ((total_capital - settings.initial_capital) / settings.initial_capital) * 100,
+            (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
             2,
         ),
     }
 
 @app.get("/api/positions")
 async def get_positions(status: Optional[str] = None) -> Dict[str, Any]:
-    """Get positions (open/closed)"""
+    """Get positions (executed trades)"""
     with get_db() as db:
-        query = db.query(Position)
+        query = db.query(CopiedTrade)
         
         if status:
-            query = query.filter(Position.status == status.upper())
+            # Map status to TradeStatus enum
+            from bot.database import TradeStatus
+            if status.upper() == "OPEN":
+                query = query.filter(CopiedTrade.status == TradeStatus.PENDING)
+            elif status.upper() == "CLOSED":
+                query = query.filter(CopiedTrade.status == TradeStatus.EXECUTED)
             
-        positions = query.order_by(Position.opened_at.desc()).limit(50).all()
+        positions = query.order_by(CopiedTrade.created_at.desc()).limit(50).all()
         
     return {
         "positions": [
             {
                 "id": p.id,
                 "token_id": p.token_id,
-                "entry_price": float(p.entry_price),
+                "entry_price": float(p.price),
                 "amount_usdc": float(p.amount_usdc),
                 "side": p.side,
-                "status": p.status,
+                "status": p.status.value,
                 "pnl_usdc": float(p.pnl_usdc) if p.pnl_usdc else None,
-                "opened_at": p.opened_at.isoformat() if p.opened_at else None,
-                "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+                "opened_at": p.created_at.isoformat() if p.created_at else None,
+                "closed_at": p.executed_at.isoformat() if p.executed_at else None,
                 "market_question": p.market_question,
             }
             for p in positions
@@ -291,8 +291,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Keep connection alive + stream latest trades
             with get_db() as db:
                 latest_trades = (
-                    db.query(Trade)
-                    .order_by(Trade.timestamp.desc())
+                    db.query(CopiedTrade)
+                    .order_by(CopiedTrade.created_at.desc())
                     .limit(5)
                     .all()
                 )
@@ -305,7 +305,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "side": t.side,
                         "amount": float(t.amount_usdc),
                         "pnl": float(t.pnl_usdc) if t.pnl_usdc else None,
-                        "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                        "timestamp": t.created_at.isoformat() if t.created_at else None,
                     }
                     for t in latest_trades
                 ],
