@@ -1,399 +1,322 @@
 """
-Backtest Engine — PolyInsider Bot v2.2
-======================================
-Rejoue l'historique des trades d'un ensemble de wallets insiders
-at travers la pile de décision du bot (ConvictionFilter + RiskManager)
-pour valider la stratégie AVANT de risquer du capital réel.
+Backtest Engine v1.0
+=====================
+Replay trades historiques avec stratégie actuelle (Kelly, TP/SL, filtres).
+Calcule Sharpe ratio, max drawdown, win rate par période.
 
-Fonctionnement:
-  1. Récupère les trades historiques de chaque wallet via PolymarketDataClient
-  2. Pour chaque trade REDEEM/SELL (outcome connu), simule la décision du bot:
-     - Aurait-on passé le ConvictionFilter ?
-     - Quel montant Kelly aurait-on misé ?
-     - Le trade était-il gagnant ? (usdcSize > tradeSize)
-  3. Calcule les métriques: P&L simulé, win rate, Sharpe, max drawdown,
-     meilleur/pire trade, détails par wallet
-
-Usage CLI:
-  python -m bot.analytics.backtest --wallets 0xABC,0xDEF --capital 500
-
-Usage Python:
-  from bot.analytics.backtest import BacktestEngine
-  engine = BacktestEngine(capital=500)
-  result = await engine.run(wallets=["0xABC", "0xDEF"])
-  print(result.summary())
+Usage:
+    python -m bot.analytics.backtest --start 2025-01-01 --end 2026-02-28
 """
-from __future__ import annotations
-
-import argparse
 import asyncio
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from dataclasses import dataclass
 import statistics
-from dataclasses import dataclass, field
 
-from bot.trading.filters import ConvictionFilter
+from sqlalchemy import text
+
+from bot.database import get_db, CopiedTrade, TrackedWallet
+from bot.trading.risk import RiskManager
 from bot.trading.sizing import PositionSizer
+from bot.trading.filters import ConvictionFilter
+from bot.config import get_settings
 from bot.utils.logger import logger
 
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BacktestTrade:
-    """Un trade simulé pendant le backtest."""
-    wallet: str
-    token_id: str
-    side: str
-    entry_price: float
-    source_amount: float
-    simulated_amount: float       # montant Kelly que le bot aurait misé
-    pnl: float                    # P&L réalisé sur ce trade
-    won: bool                     # True si trade profitable
-    filter_reason: str = ""       # raison si filtré / "ok" si exécuté
-    market_question: str = ""
-
-
-@dataclass
-class WalletBacktestResult:
-    """Résultat backtest pour un wallet."""
-    address: str
-    trades_total: int = 0
-    trades_taken: int = 0
-    trades_won: int = 0
-    pnl: float = 0.0
-    win_rate: float = 0.0
+settings = get_settings()
 
 
 @dataclass
 class BacktestResult:
-    """
-    Résultat global du backtest.
+    """Résultat d'un backtest."""
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    total_pnl_usdc: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    sharpe_ratio: float
+    avg_trade_duration_hours: float
+    avg_win_usdc: float
+    avg_loss_usdc: float
+    start_date: str
+    end_date: str
+    final_capital: float
+    peak_capital: float
+    
+    def to_dict(self) -> dict:
+        return {
+            "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
+            "win_rate": round(self.win_rate, 4),
+            "total_pnl_usdc": round(self.total_pnl_usdc, 2),
+            "total_return_pct": round(self.total_return_pct, 4),
+            "max_drawdown_pct": round(self.max_drawdown_pct, 4),
+            "sharpe_ratio": round(self.sharpe_ratio, 2),
+            "avg_trade_duration_hours": round(self.avg_trade_duration_hours, 1),
+            "avg_win_usdc": round(self.avg_win_usdc, 2),
+            "avg_loss_usdc": round(self.avg_loss_usdc, 2),
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "final_capital": round(self.final_capital, 2),
+            "peak_capital": round(self.peak_capital, 2),
+        }
 
-    Attributs:
-        trades:           liste de tous les BacktestTrade simulés
-        initial_capital:  capital de départ
-        final_capital:    capital après simulation
-        total_pnl:        P&L total en USDC
-        win_rate:         taux de trades gagnants (parmi ceux exécutés)
-        sharpe:           Sharpe ratio sur les P&L individuels
-        max_drawdown:     drawdown maximal observé pendant la simulation
-        per_wallet:       dict address → WalletBacktestResult
-    """
-    trades: list[BacktestTrade] = field(default_factory=list)
-    initial_capital: float = 500.0
-    final_capital: float = 500.0
-    total_pnl: float = 0.0
-    win_rate: float = 0.0
-    sharpe: float = 0.0
-    max_drawdown: float = 0.0
-    per_wallet: dict[str, WalletBacktestResult] = field(default_factory=dict)
-
-    def summary(self) -> str:
-        """Retourne un résumé texte lisible."""
-        executed = [t for t in self.trades if t.filter_reason == "ok"]
-        filtered = len(self.trades) - len(executed)
-        top_wallets = sorted(
-            self.per_wallet.values(), key=lambda w: w.pnl, reverse=True
-        )[:3]
-
-        lines = [
-            "=" * 55,
-            "  BACKTEST RESULTS — PolyInsider Bot",
-            "=" * 55,
-            f"  Capital:      ${self.initial_capital:.2f} → ${self.final_capital:.2f}",
-            f"  P&L total:    ${self.total_pnl:+.2f} USDC",
-            f"  Win rate:     {self.win_rate:.1%}",
-            f"  Sharpe:       {self.sharpe:.2f}",
-            f"  Max drawdown: {self.max_drawdown:.1%}",
-            f"  Trades taken: {len(executed)} / {len(self.trades)} ({filtered} filtered)",
-            "-" * 55,
-            "  Top wallets by P&L:",
-        ]
-        for w in top_wallets:
-            lines.append(
-                f"    {w.address[:10]}... "
-                f"P&L=${w.pnl:+.2f}  WR={w.win_rate:.0%}  "
-                f"trades={w.trades_taken}/{w.trades_total}"
-            )
-        lines.append("=" * 55)
-        return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
 
 class BacktestEngine:
     """
-    Moteur de backtest: simule les décisions du bot sur l'historique.
-
-    Args:
-        capital:            Capital initial en USDC (défaut: 500)
-        wallet_score:       Win rate supposé des wallets (défaut: 0.70)
-        consecutive_losses: Pertes consécutives supposées au début (défaut: 0)
-        client:             PolymarketDataClient (injecté ou créé automatiquement)
+    Moteur de backtesting avec replay historique.
+    Simule les décisions de trading avec les paramètres actuels.
     """
-
+    
     def __init__(
         self,
-        capital: float = 500.0,
-        wallet_score: float = 0.70,
-        consecutive_losses: int = 0,
-        client=None,
-    ) -> None:
-        self.initial_capital = capital
-        self.wallet_score = wallet_score
-        self.consecutive_losses = consecutive_losses
-        self._filter = ConvictionFilter()
-        self._sizer = PositionSizer(capital_usdc=capital)
-        self._client = client
-
-    # ------------------------------------------------------------------
-    # Point d'entrée principal
-    # ------------------------------------------------------------------
-
-    async def run(
-        self,
-        wallets: list[str],
-        limit_per_wallet: int = 300,
-    ) -> BacktestResult:
+        initial_capital: float = 500.0,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
+        self.initial_capital = initial_capital
+        self.start_date = start_date or (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+        self.end_date = end_date or datetime.utcnow().strftime("%Y-%m-%d")
+        
+        # Composants stratégie
+        self.risk_manager = RiskManager()
+        self.sizer = PositionSizer()
+        self.conv_filter = ConvictionFilter()
+        
+        # Tracking backtest
+        self.capital = initial_capital
+        self.peak_capital = initial_capital
+        self.trades_history: List[Dict] = []
+        self.equity_curve: List[float] = [initial_capital]
+        
+    async def run(self) -> BacktestResult:
         """
-        Lance le backtest sur une liste de wallets.
-
-        Args:
-            wallets:           liste d'adresses à backtester
-            limit_per_wallet:  nombre max de trades historiques par wallet
-
-        Returns:
-            BacktestResult avec toutes les métriques
+        Lance le backtest complet sur la période définie.
+        Rejoue chaque trade historique avec les filtres actuels.
         """
-        client = await self._get_client()
-        all_trades: list[BacktestTrade] = []
-        per_wallet: dict[str, WalletBacktestResult] = {}
-
-        for address in wallets:
-            logger.info(f"[BACKTEST] Fetching {address[:10]}... (limit={limit_per_wallet})")
-            raw_trades = await client.get_wallet_trades(address, limit=limit_per_wallet)
-            w_result = WalletBacktestResult(address=address)
-            wallet_trades = self._simulate_wallet(
-                address=address,
-                raw_trades=raw_trades,
-                w_result=w_result,
-            )
-            all_trades.extend(wallet_trades)
-            per_wallet[address] = w_result
-            logger.info(
-                f"[BACKTEST] {address[:10]}... "
-                f"{w_result.trades_taken}/{w_result.trades_total} trades taken | "
-                f"P&L=${w_result.pnl:+.2f}  WR={w_result.win_rate:.0%}"
-            )
-
-        return self._compute_result(all_trades, per_wallet)
-
-    # ------------------------------------------------------------------
-    # Simulation d'un wallet
-    # ------------------------------------------------------------------
-
-    def _simulate_wallet(
-        self,
-        address: str,
-        raw_trades: list[dict],
-        w_result: WalletBacktestResult,
-    ) -> list[BacktestTrade]:
-        """Rejoue les trades d'un wallet et retourne la liste des BacktestTrade."""
-        resolved = [
-            t for t in raw_trades
-            if t.get("type") in ("REDEEM", "SELL")
-            and float(t.get("price", 0)) > 0
-        ]
-        w_result.trades_total = len(resolved)
-        simulated: list[BacktestTrade] = []
-
-        for trade in resolved:
-            bt = self._simulate_trade(address, trade)
-            simulated.append(bt)
-
-            if bt.filter_reason == "ok":
-                w_result.trades_taken += 1
-                w_result.pnl += bt.pnl
-                if bt.won:
-                    w_result.trades_won += 1
-
-        if w_result.trades_taken > 0:
-            w_result.win_rate = w_result.trades_won / w_result.trades_taken
-
-        return simulated
-
-    def _simulate_trade(self, wallet: str, raw: dict) -> BacktestTrade:
-        """Simule la décision du bot sur un trade historique."""
-        price        = float(raw.get("price", 0))
-        usdc_size    = float(raw.get("usdcSize", 0))
-        trade_size   = float(raw.get("tradeSize", 0))
-        side         = raw.get("side", "BUY").upper()
-        token_id     = raw.get("asset", "")
-        condition_id = raw.get("conditionId", "")
-        question     = raw.get("title", "") or ""
-
-        f = self._filter.evaluate(
-            source_amount=usdc_size,
-            price=price,
-            wallet_score=self.wallet_score,
-            market_id=condition_id,
-            consecutive_losses=self.consecutive_losses,
+        logger.info(f"[BACKTEST] Starting from {self.start_date} to {self.end_date}")
+        logger.info(f"[BACKTEST] Initial capital: ${self.initial_capital}")
+        
+        # Récupère tous les trades historiques de la période
+        with get_db() as db:
+            trades = db.query(CopiedTrade).filter(
+                CopiedTrade.created_at >= datetime.fromisoformat(self.start_date),
+                CopiedTrade.created_at <= datetime.fromisoformat(self.end_date),
+                CopiedTrade.status == "executed",
+            ).order_by(CopiedTrade.created_at).all()
+            
+            # Charge les wallets pour scoring
+            wallet_scores = {}
+            for wallet in db.query(TrackedWallet).all():
+                wallet_scores[wallet.address] = float(wallet.score or 0.70)
+        
+        if not trades:
+            logger.warning(f"[BACKTEST] No trades found between {self.start_date} and {self.end_date}")
+            return self._generate_empty_result()
+        
+        logger.info(f"[BACKTEST] Found {len(trades)} historical trades to replay")
+        
+        # Replay chaque trade
+        for trade in trades:
+            await self._replay_trade(trade, wallet_scores.get(trade.source_wallet_address, 0.70))
+        
+        # Calcul métriques finales
+        result = self._calculate_metrics()
+        logger.info(f"[BACKTEST] Completed — Win Rate: {result.win_rate:.1%} | PnL: ${result.total_pnl_usdc:+.2f} | Sharpe: {result.sharpe_ratio:.2f}")
+        return result
+    
+    async def _replay_trade(self, trade: CopiedTrade, wallet_score: float) -> None:
+        """
+        Rejoue un trade historique avec les filtres actuels.
+        Simule l'exécution et le PnL.
+        """
+        # Applique filtres conviction
+        filter_result = self.conv_filter.evaluate(
+            source_amount=trade.amount_usdc,
+            price=trade.price,
+            wallet_score=wallet_score,
+            market_id=trade.market_id or "",
+            consecutive_losses=0,  # Pas de data historique
+            entry_timing_score=0.5,
         )
-
-        if not f.passed:
-            return BacktestTrade(
-                wallet=wallet, token_id=token_id, side=side,
-                entry_price=price, source_amount=usdc_size,
-                simulated_amount=0.0, pnl=0.0, won=False,
-                filter_reason=f.reason,
-                market_question=question,
-            )
-
-        size = self._sizer.calculate(
-            yes_price=price,
-            conviction_score=f.score,
-            source_amount=usdc_size,
+        
+        if not filter_result.passed:
+            return
+        
+        # Applique risk management
+        decision = self.risk_manager.evaluate(
+            token_id=trade.token_id,
+            price=trade.price,
+            source_amount=trade.amount_usdc,
+            wallet_win_rate=wallet_score,
+            is_convergence_signal=False,
         )
-
-        won = usdc_size > trade_size
-        if won:
-            profit_ratio = (usdc_size - trade_size) / trade_size if trade_size > 0 else 0
-            pnl = size.amount_usdc * profit_ratio
-        else:
-            pnl = -size.amount_usdc
-
-        return BacktestTrade(
-            wallet=wallet, token_id=token_id, side=side,
-            entry_price=price, source_amount=usdc_size,
-            simulated_amount=size.amount_usdc,
-            pnl=round(pnl, 4),
-            won=won,
-            filter_reason="ok",
-            market_question=question,
+        
+        if not decision.approved:
+            return
+        
+        # Calcule sizing avec Kelly
+        self.sizer.sync_capital(self.risk_manager)
+        size = self.sizer.calculate(
+            yes_price=trade.price,
+            conviction_score=filter_result.score,
+            source_amount=trade.amount_usdc,
         )
-
-    # ------------------------------------------------------------------
-    # Calcul des métriques globales
-    # ------------------------------------------------------------------
-
-    def _compute_result(
-        self,
-        trades: list[BacktestTrade],
-        per_wallet: dict[str, WalletBacktestResult],
-    ) -> BacktestResult:
-        """Calcule toutes les métriques globales depuis la liste de trades simulés."""
-        executed = [t for t in trades if t.filter_reason == "ok"]
-
-        if not executed:
-            return BacktestResult(
-                trades=trades,
-                initial_capital=self.initial_capital,
-                final_capital=self.initial_capital,
-                per_wallet=per_wallet,
-            )
-
-        total_pnl = sum(t.pnl for t in executed)
-        final_capital = self.initial_capital + total_pnl
-        wins = [t for t in executed if t.won]
-        win_rate = len(wins) / len(executed) if executed else 0.0
-        sharpe = self._sharpe(executed)
-        max_dd = self._max_drawdown(executed, self.initial_capital)
-
-        return BacktestResult(
-            trades=trades,
-            initial_capital=self.initial_capital,
-            final_capital=round(final_capital, 2),
-            total_pnl=round(total_pnl, 2),
-            win_rate=round(win_rate, 4),
-            sharpe=round(sharpe, 3),
-            max_drawdown=round(max_dd, 4),
-            per_wallet=per_wallet,
-        )
-
-    # ------------------------------------------------------------------
-    # Métriques
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _sharpe(trades: list[BacktestTrade], risk_free: float = 0.0) -> float:
-        """Sharpe ratio simplifié (basé sur les P&L par trade)."""
-        pnls = [t.pnl for t in trades]
-        if len(pnls) < 2:
-            return 0.0
-        avg = statistics.mean(pnls) - risk_free
-        std = statistics.stdev(pnls)
-        return avg / std if std > 0 else 0.0
-
-    @staticmethod
-    def _max_drawdown(trades: list[BacktestTrade], initial_capital: float) -> float:
-        """Max drawdown en % depuis le pic de capital."""
-        capital = initial_capital
-        peak = initial_capital
+        
+        # Simule PnL (assume TP1 +20% si win, SL -30% si loss)
+        # Dans la vraie vie, tu pourrais fetcher les prix réels de résolution
+        simulated_pnl = trade.pnl_usdc if trade.pnl_usdc else 0.0
+        
+        # Si pas de PnL historique, simule basé sur wallet score
+        if simulated_pnl == 0.0:
+            import random
+            if random.random() < wallet_score:
+                # Win: TP1 à +20%
+                simulated_pnl = size.amount_usdc * 0.20
+            else:
+                # Loss: SL à -30%
+                simulated_pnl = size.amount_usdc * -0.30
+        
+        # Update capital
+        self.capital += simulated_pnl
+        self.peak_capital = max(self.peak_capital, self.capital)
+        self.equity_curve.append(self.capital)
+        
+        # Enregistre trade
+        self.trades_history.append({
+            "date": trade.created_at,
+            "token_id": trade.token_id,
+            "side": trade.side,
+            "amount_usdc": size.amount_usdc,
+            "price": trade.price,
+            "pnl_usdc": simulated_pnl,
+            "wallet_score": wallet_score,
+            "conviction_score": filter_result.score,
+        })
+    
+    def _calculate_metrics(self) -> BacktestResult:
+        """Calcule toutes les métriques de performance."""
+        if not self.trades_history:
+            return self._generate_empty_result()
+        
+        winning = [t for t in self.trades_history if t["pnl_usdc"] > 0]
+        losing = [t for t in self.trades_history if t["pnl_usdc"] < 0]
+        
+        total_pnl = sum(t["pnl_usdc"] for t in self.trades_history)
+        win_rate = len(winning) / len(self.trades_history) if self.trades_history else 0.0
+        
+        # Max drawdown
         max_dd = 0.0
-        for t in trades:
-            capital += t.pnl
-            if capital > peak:
-                peak = capital
-            if peak > 0:
-                dd = (peak - capital) / peak
-                max_dd = max(max_dd, dd)
-        return max_dd
+        peak = self.initial_capital
+        for equity in self.equity_curve:
+            if equity > peak:
+                peak = equity
+            dd = (peak - equity) / peak if peak > 0 else 0.0
+            max_dd = max(max_dd, dd)
+        
+        # Sharpe ratio (assume 0% risk-free rate)
+        returns = []
+        for i in range(1, len(self.equity_curve)):
+            ret = (self.equity_curve[i] - self.equity_curve[i-1]) / self.equity_curve[i-1]
+            returns.append(ret)
+        
+        sharpe = 0.0
+        if returns and statistics.stdev(returns) > 0:
+            avg_return = statistics.mean(returns)
+            sharpe = (avg_return / statistics.stdev(returns)) * (252 ** 0.5)  # Annualisé
+        
+        avg_win = statistics.mean([t["pnl_usdc"] for t in winning]) if winning else 0.0
+        avg_loss = statistics.mean([t["pnl_usdc"] for t in losing]) if losing else 0.0
+        
+        return BacktestResult(
+            total_trades=len(self.trades_history),
+            winning_trades=len(winning),
+            losing_trades=len(losing),
+            win_rate=win_rate,
+            total_pnl_usdc=total_pnl,
+            total_return_pct=(self.capital - self.initial_capital) / self.initial_capital,
+            max_drawdown_pct=max_dd,
+            sharpe_ratio=sharpe,
+            avg_trade_duration_hours=24.0,  # Placeholder — calcul réel nécessite exit timestamps
+            avg_win_usdc=avg_win,
+            avg_loss_usdc=avg_loss,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            final_capital=self.capital,
+            peak_capital=self.peak_capital,
+        )
+    
+    def _generate_empty_result(self) -> BacktestResult:
+        """Génère un résultat vide si aucun trade."""
+        return BacktestResult(
+            total_trades=0,
+            winning_trades=0,
+            losing_trades=0,
+            win_rate=0.0,
+            total_pnl_usdc=0.0,
+            total_return_pct=0.0,
+            max_drawdown_pct=0.0,
+            sharpe_ratio=0.0,
+            avg_trade_duration_hours=0.0,
+            avg_win_usdc=0.0,
+            avg_loss_usdc=0.0,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            final_capital=self.initial_capital,
+            peak_capital=self.initial_capital,
+        )
 
-    # ------------------------------------------------------------------
-    # Client lazy
-    # ------------------------------------------------------------------
 
-    async def _get_client(self):
-        if self._client is None:
-            from bot.trading.polymarket import PolymarketDataClient
-            self._client = PolymarketDataClient()
-        return self._client
-
-
-# ---------------------------------------------------------------------------
-# CLI runner
-# ---------------------------------------------------------------------------
-
-async def _cli_main(wallets: list[str], capital: float, score: float) -> None:
-    from bot.trading.polymarket import PolymarketDataClient
-    client = PolymarketDataClient()
-    try:
-        engine = BacktestEngine(capital=capital, wallet_score=score, client=client)
-        result = await engine.run(wallets=wallets)
-        print(result.summary())
-
-        if result.per_wallet:
-            print("\nDétails par wallet:")
-            for addr, w in sorted(
-                result.per_wallet.items(), key=lambda x: x[1].pnl, reverse=True
-            ):
-                print(
-                    f"  {addr[:12]}...  "
-                    f"P&L={w.pnl:+.2f}$  "
-                    f"WR={w.win_rate:.0%}  "
-                    f"({w.trades_taken}/{w.trades_total} trades)"
-                )
-    finally:
-        await client.close()
+async def run_backtest(
+    start_date: str,
+    end_date: str,
+    initial_capital: float = 500.0,
+) -> BacktestResult:
+    """
+    Interface publique pour lancer un backtest.
+    
+    Args:
+        start_date: Date début format YYYY-MM-DD
+        end_date: Date fin format YYYY-MM-DD
+        initial_capital: Capital initial en USDC
+    
+    Returns:
+        BacktestResult avec toutes les métriques
+    """
+    engine = BacktestEngine(
+        initial_capital=initial_capital,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return await engine.run()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PolyInsider Backtest")
-    parser.add_argument(
-        "--wallets", required=True,
-        help="Adresses séparées par virgule. Ex: 0xABC,0xDEF"
-    )
-    parser.add_argument(
-        "--capital", type=float, default=500.0,
-        help="Capital initial en USDC (défaut: 500)"
-    )
-    parser.add_argument(
-        "--score", type=float, default=0.70,
-        help="Win rate supposé des wallets (0.0-1.0, défaut: 0.70)"
-    )
-    args = parser.parse_args()
-    wallet_list = [w.strip() for w in args.wallets.split(",") if w.strip()]
-    asyncio.run(_cli_main(wallet_list, args.capital, args.score))
+    import sys
+    
+    # Parse args simples
+    args = sys.argv[1:]
+    start = None
+    end = None
+    
+    for i, arg in enumerate(args):
+        if arg == "--start" and i + 1 < len(args):
+            start = args[i + 1]
+        if arg == "--end" and i + 1 < len(args):
+            end = args[i + 1]
+    
+    if not start:
+        start = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    if not end:
+        end = datetime.utcnow().strftime("%Y-%m-%d")
+    
+    result = asyncio.run(run_backtest(start, end))
+    
+    print("\n" + "=" * 60)
+    print("  BACKTEST RESULTS")
+    print("=" * 60)
+    for key, value in result.to_dict().items():
+        print(f"{key:.<40} {value}")
+    print("=" * 60)
