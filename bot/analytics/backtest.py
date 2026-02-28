@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 
 from bot.config import get_settings
-from bot.database import get_db, Trade
+from bot.database import get_db, CopiedTrade
 from bot.trading.sizing import PositionSizer
 from bot.utils.logger import logger
 
@@ -75,15 +75,15 @@ class BacktestEngine:
         
         # Fetch historical trades from database
         with get_db() as db:
-            query = db.query(Trade).filter(
-                Trade.timestamp >= self.start_date,
-                Trade.timestamp <= self.end_date,
+            query = db.query(CopiedTrade).filter(
+                CopiedTrade.created_at >= self.start_date,
+                CopiedTrade.created_at <= self.end_date,
             )
             
             if wallet_addresses:
-                query = query.filter(Trade.source_wallet.in_(wallet_addresses))
+                query = query.filter(CopiedTrade.source_wallet_address.in_(wallet_addresses))
                 
-            trades = query.order_by(Trade.timestamp.asc()).all()
+            trades = query.order_by(CopiedTrade.created_at.asc()).all()
             
         if not trades:
             logger.warning("[BACKTEST] No historical trades found for period")
@@ -103,7 +103,7 @@ class BacktestEngine:
             size = sizer.calculate(
                 yes_price=float(trade.price),
                 conviction_score=0.75,  # Default mid-range
-                source_amount=float(trade.source_amount or 100),
+                source_amount=float(trade.amount_usdc or 100),
             )
             
             # Simulate trade outcome
@@ -177,7 +177,7 @@ class BacktestEngine:
         
         return result
         
-    def _estimate_pnl(self, trade: Trade, position_size: float) -> float:
+    def _estimate_pnl(self, trade: CopiedTrade, position_size: float) -> float:
         """Estimate PnL if not recorded (using TP/SL rules)"""
         # Simplified: 70% hit TP1 (+20%), 20% hit SL (-30%), 10% neutral
         import random
