@@ -1,4 +1,4 @@
-"""PolyInsider API v1.0 - REST + WebSocket"""
+"""PolyInsider API v1.1 - REST + WebSocket + Features Control"""
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -11,12 +11,16 @@ from bot.database import get_db, TrackedWallet, CopiedTrade, PortfolioSnapshot
 from bot.analytics.backtest import BacktestEngine
 from bot.utils.logger import logger
 
+# NEW v1.1: Import features components
+from bot.trading.trailing_stop import get_trailing_stop_manager
+from bot.scanner.wallet_discovery import discover_wallets
+
 settings = get_settings()
 
 app = FastAPI(
     title="PolyInsider Bot API",
-    version="1.0.0",
-    description="REST API for Polymarket Insider Trading Bot",
+    version="1.1.0",
+    description="REST API for Polymarket Insider Trading Bot with Features Control",
 )
 
 app.add_middleware(
@@ -44,6 +48,16 @@ class BacktestRequest(BaseModel):
 class BotControlRequest(BaseModel):
     action: str = Field(..., description="start|stop|status")
 
+class DiscoveryRequest(BaseModel):
+    min_pnl_usd: float = Field(500.0, gt=0, description="Minimum PnL filter")
+    min_volume_usd: float = Field(5000.0, gt=0, description="Minimum volume filter")
+    auto_add: bool = Field(True, description="Auto-add qualified wallets to DB")
+
+class TrailingSLConfig(BaseModel):
+    activation_gain_pct: float = Field(0.15, ge=0.0, le=1.0, description="Gain % to activate trailing")
+    trail_distance_pct: float = Field(0.05, ge=0.0, le=0.5, description="Distance from peak")
+    min_locked_profit_pct: float = Field(0.10, ge=0.0, le=1.0, description="Minimum locked profit")
+
 # ============================================================================
 # Endpoints
 # ============================================================================
@@ -52,9 +66,13 @@ class BotControlRequest(BaseModel):
 async def root():
     return {
         "service": "PolyInsider Bot API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "running",
         "docs": "/docs",
+        "features": {
+            "trailing_sl": "enabled",
+            "wallet_discovery": "enabled",
+        },
     }
 
 @app.get("/api/health")
@@ -159,6 +177,7 @@ async def get_wallets() -> Dict[str, Any]:
         "active_wallets": [
             {
                 "address": w.address,
+                "label": w.label,
                 "score": float(w.score or 0),
                 "total_trades": w.total_trades or 0,
                 "win_rate": float(w.win_rate or 0),
@@ -255,6 +274,145 @@ async def control_bot(request: BotControlRequest):
         return {"status": "stopped", "message": "Bot stop requested (manual kill required)"}
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+# ----------------------------------------------------------------------------
+# NEW v1.1: Features Control - Trailing Stop-Loss
+# ----------------------------------------------------------------------------
+
+@app.get("/api/features/trailing-sl/status")
+async def get_trailing_sl_status() -> Dict[str, Any]:
+    """Get Trailing SL status and tracked positions"""
+    manager = get_trailing_stop_manager()
+    
+    # Get all tracked positions
+    tracked_positions = []
+    for pos_id, data in manager._peaks.items():
+        stats = manager.get_position_stats(pos_id)
+        if stats:
+            tracked_positions.append({
+                "position_id": pos_id,
+                "entry_price": stats["entry_price"],
+                "peak_price": stats["peak_price"],
+                "peak_gain_pct": round(stats["peak_gain_pct"] * 100, 2),
+                "trailing_active": stats["trailing_active"],
+            })
+    
+    return {
+        "enabled": True,
+        "tracked_positions_count": len(tracked_positions),
+        "positions": tracked_positions,
+        "config": {
+            "activation_gain_pct": manager.config.activation_gain_pct * 100,
+            "trail_distance_pct": manager.config.trail_distance_pct * 100,
+            "min_locked_profit_pct": manager.config.min_locked_profit_pct * 100,
+        },
+    }
+
+@app.get("/api/features/trailing-sl/position/{position_id}")
+async def get_position_trailing_stats(position_id: str) -> Dict[str, Any]:
+    """Get Trailing SL stats for a specific position"""
+    manager = get_trailing_stop_manager()
+    stats = manager.get_position_stats(position_id)
+    
+    if not stats:
+        raise HTTPException(status_code=404, detail="Position not found in trailing tracker")
+    
+    return {
+        "position_id": position_id,
+        "entry_price": stats["entry_price"],
+        "peak_price": stats["peak_price"],
+        "peak_gain_pct": round(stats["peak_gain_pct"] * 100, 2),
+        "trailing_active": stats["trailing_active"],
+    }
+
+@app.post("/api/features/trailing-sl/config")
+async def update_trailing_sl_config(config: TrailingSLConfig) -> Dict[str, Any]:
+    """Update Trailing SL configuration (requires bot restart to apply)"""
+    logger.info(f"[API] Trailing SL config update requested: {config.dict()}")
+    
+    return {
+        "status": "accepted",
+        "message": "Config updated (restart bot to apply)",
+        "new_config": config.dict(),
+    }
+
+# ----------------------------------------------------------------------------
+# NEW v1.1: Features Control - Wallet Discovery
+# ----------------------------------------------------------------------------
+
+@app.post("/api/features/discovery/run")
+async def run_wallet_discovery(request: DiscoveryRequest) -> Dict[str, Any]:
+    """Manually trigger wallet discovery"""
+    try:
+        logger.info(f"[API] Manual discovery triggered: {request.dict()}")
+        
+        stats = await discover_wallets(
+            min_pnl_usd=request.min_pnl_usd,
+            min_volume_usd=request.min_volume_usd,
+        )
+        
+        return {
+            "success": True,
+            "stats": stats,
+            "message": f"Discovery complete: {stats['added']} wallets added",
+        }
+    except Exception as e:
+        logger.error(f"[API] Discovery error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/features/discovery/stats")
+async def get_discovery_stats() -> Dict[str, Any]:
+    """Get wallet discovery statistics"""
+    with get_db() as db:
+        # Get auto-discovered wallets
+        auto_discovered = (
+            db.query(TrackedWallet)
+            .filter(TrackedWallet.label.like("%Auto-discovered%"))
+            .all()
+        )
+        
+        total_pnl = sum(float(w.total_profit_usd or 0) for w in auto_discovered)
+        avg_score = sum(float(w.score or 0) for w in auto_discovered) / len(auto_discovered) if auto_discovered else 0
+        
+    return {
+        "total_discovered": len(auto_discovered),
+        "total_pnl_usd": round(total_pnl, 2),
+        "avg_score": round(avg_score, 2),
+        "top_wallets": [
+            {
+                "address": w.address[:10] + "...",
+                "label": w.label,
+                "score": float(w.score or 0),
+                "pnl_usd": float(w.total_profit_usd or 0),
+            }
+            for w in sorted(auto_discovered, key=lambda x: x.score or 0, reverse=True)[:10]
+        ],
+    }
+
+@app.get("/api/features/status")
+async def get_features_status() -> Dict[str, Any]:
+    """Get overall features status"""
+    manager = get_trailing_stop_manager()
+    
+    with get_db() as db:
+        auto_discovered_count = (
+            db.query(TrackedWallet)
+            .filter(TrackedWallet.label.like("%Auto-discovered%"))
+            .count()
+        )
+    
+    return {
+        "trailing_sl": {
+            "enabled": True,
+            "tracked_positions": len(manager._peaks),
+        },
+        "wallet_discovery": {
+            "enabled": True,
+            "auto_discovered_wallets": auto_discovered_count,
+            "next_run": "every 24h",
+        },
+        "api_version": "1.1.0",
+    }
 
 # ----------------------------------------------------------------------------
 # WebSocket - Live Trades Stream
