@@ -1,6 +1,6 @@
 # Core
 py-clob-client==0.34.6
-py-order-utils==1.4.1
+py-order-utils==0.3.2
 web3==7.5.0
 
 # Database
