@@ -19,8 +19,8 @@ class WalletDiscoveryConfig:
     min_volume_usd: float = 5000.0  # $5k minimum volume
     min_trades: int = 20  # 20 trades minimum
     
-    # Leaderboard settings
-    leaderboard_url: str = "https://gamma-api.polymarket.com/leaderboard"
+    # Leaderboard settings (Updated Feb 2026)
+    leaderboard_url: str = "https://data-api.polymarket.com/leaderboard"
     fetch_limit: int = 100  # Top 100 traders
     
     # Rate limiting
@@ -40,7 +40,7 @@ class WalletDiscovery:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                headers={"User-Agent": "PolyInsider-Bot/1.0"},
+                headers={"User-Agent": "PolyInsider-Bot/2.0"},
             )
         return self._session
         
@@ -51,14 +51,16 @@ class WalletDiscovery:
             
     async def fetch_leaderboard(
         self,
-        period: str = "all_time",
+        period: str = "ALL",  # DAY, WEEK, MONTH, ALL
+        order_by: str = "PNL",  # PNL or VOL
         limit: int = 100,
     ) -> List[Dict]:
         """
         Fetch traders from Polymarket leaderboard.
         
         Args:
-            period: "all_time", "monthly", "weekly"
+            period: "DAY", "WEEK", "MONTH", "ALL"
+            order_by: "PNL" or "VOL"
             limit: Number of traders to fetch
             
         Returns:
@@ -68,13 +70,26 @@ class WalletDiscovery:
         
         for attempt in range(self.config.max_retries):
             try:
+                params = {
+                    "period": period,
+                    "orderBy": order_by,
+                    "limit": limit,
+                    "category": "OVERALL",
+                }
+                
                 async with session.get(
                     self.config.leaderboard_url,
-                    params={"limit": limit, "period": period},
+                    params=params,
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        traders = data if isinstance(data, list) else []
+                        
+                        # API returns {"leaderboard": [...]} or just [...]
+                        traders = data.get("leaderboard", data) if isinstance(data, dict) else data
+                        
+                        if not isinstance(traders, list):
+                            traders = []
+                            
                         logger.info(
                             f"[DISCOVERY] Fetched {len(traders)} traders from leaderboard"
                         )
@@ -88,8 +103,9 @@ class WalletDiscovery:
                         await asyncio.sleep(wait_time)
                         
                     else:
+                        text = await resp.text()
                         logger.warning(
-                            f"[DISCOVERY] API returned {resp.status}: {await resp.text()}"
+                            f"[DISCOVERY] API returned {resp.status}: {text[:200]}"
                         )
                         break
                         
@@ -122,15 +138,24 @@ class WalletDiscovery:
         qualified = []
         
         for trader in traders:
-            address = trader.get("address", "")
+            # API field names (updated for Data API)
+            address = trader.get("address", trader.get("user", ""))
             if not address or address.lower() in existing:
                 continue
                 
-            # Extract stats (API field names may vary)
+            # Extract stats - handle multiple field name variations
             win_rate = trader.get("winRate", trader.get("win_rate", 0.0))
-            volume = trader.get("volumeTraded", trader.get("volume", 0.0))
-            trades_count = trader.get("tradesCount", trader.get("trades", 0))
             
+            # Volume in USDC
+            volume = trader.get("volume", trader.get("volumeTraded", 0.0))
+            
+            # Trade count
+            trades_count = trader.get("trades", trader.get("tradesCount", 0))
+            
+            # Convert percentages if needed (some APIs return 0-100 instead of 0-1)
+            if win_rate > 1.0:
+                win_rate = win_rate / 100.0
+                
             # Apply filters
             if (
                 win_rate >= self.config.min_win_rate
@@ -145,6 +170,7 @@ class WalletDiscovery:
                     "trades_count": trades_count,
                     "score": score,
                     "source": "leaderboard_discovery",
+                    "pnl": trader.get("pnl", 0.0),
                 })
                 
         # Sort by score descending
@@ -202,7 +228,7 @@ class WalletDiscovery:
                         label=f"Auto-discovered (WR={wallet_data['win_rate']:.0%})",
                         win_rate=wallet_data["win_rate"],
                         total_trades=wallet_data["trades_count"],
-                        total_profit_usd=wallet_data["volume_usd"],
+                        total_profit_usd=wallet_data.get("pnl", wallet_data["volume_usd"]),
                         score=wallet_data["score"],
                         is_active=True,
                         is_whale=wallet_data["volume_usd"] > 50000,
@@ -214,7 +240,8 @@ class WalletDiscovery:
                     
                     logger.info(
                         f"[DISCOVERY] ➕ Added {wallet_data['address'][:10]}... | "
-                        f"WR={wallet_data['win_rate']:.0%} | Score={wallet_data['score']:.2f}"
+                        f"WR={wallet_data['win_rate']:.0%} | Score={wallet_data['score']:.2f} | "
+                        f"PnL=${wallet_data.get('pnl', 0):.0f}"
                     )
                     
                 except Exception as e:
@@ -228,14 +255,14 @@ class WalletDiscovery:
         
     async def run_discovery(
         self,
-        period: str = "all_time",
+        period: str = "ALL",
         auto_add: bool = True,
     ) -> Dict[str, int]:
         """
         Run complete discovery cycle.
         
         Args:
-            period: Leaderboard period to query
+            period: Leaderboard period to query (DAY, WEEK, MONTH, ALL)
             auto_add: If True, automatically add qualified wallets to DB
             
         Returns:
