@@ -1,5 +1,5 @@
 # Core
-py-clob-client==0.29.0
+py-clob-client==0.34.6
 py-order-utils==1.4.1
 web3==7.5.0
 
