@@ -1,7 +1,7 @@
 """Dynamic Wallet Scoring - Auto recalculate win rates and exclude underperformers"""
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Optional
 
 from bot.config import get_settings
 from bot.database import get_db, TrackedWallet, Trade
