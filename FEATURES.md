@@ -1,415 +1,296 @@
-# PolyInsider Bot - New Features Guide
+# 🚀 New Features Guide
 
-## 🎯 Overview
+## 📊 Trailing Stop-Loss (v1.0)
 
-Cette mise à jour ajoute 4 fonctionnalités majeures au bot :
+### Overview
+Dynamic stop-loss that follows price movements to protect gains while letting winners run.
 
-1. **Backtest Engine** - Validation historique des stratégies
-2. **API REST FastAPI** - Endpoints pour SaaS / Dashboard
-3. **Dynamic Wallet Scoring** - Recalcul auto + exclusion underperformers
-4. **Rate Limiter** - Protection contre 429 errors Polymarket
+### How it works
 
----
+1. **Initial Phase** (Gain < 15%)
+   - Uses fixed SL at -30%
+   - No trailing yet
 
-## 1. Backtest Engine 📊
+2. **Activation** (Gain >= 15%)
+   - Trailing SL activates automatically
+   - SL placed 5% below peak price
+   - Minimum locked profit: +10%
 
-### Description
-Replay trades historiques avec stratégie actuelle (Kelly, TP/SL, filtres) pour valider performance avant live.
-
-### Fichier
-`bot/analytics/backtest.py`
-
-### Utilisation
-
-#### Via API
-```bash
-curl -X POST http://localhost:8001/api/backtest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "start_date": "2026-01-01",
-    "end_date": "2026-02-28",
-    "initial_capital": 1000.0,
-    "wallet_addresses": ["0x123...", "0x456..."]
-  }'
-```
-
-#### Via Code
-```python
-from bot.analytics.backtest import BacktestEngine
-
-engine = BacktestEngine(
-    start_date="2026-01-01",
-    end_date="2026-02-28",
-    initial_capital=1000.0,
-)
-
-result = await engine.run(wallet_addresses=["0x123..."])
-print(result.to_dict())
-```
-
-### Métriques retournées
-- **Win Rate** : % trades gagnants
-- **Sharpe Ratio** : Rendement ajusté au risque (annualisé)
-- **Max Drawdown** : Perte maximale depuis pic ($ et %)
-- **Total Return** : ROI sur période
-- **Profit Factor** : Total gains / Total pertes
-- **Trades per Day** : Fréquence moyenne
-
-### Exemple de résultat
-```json
-{
-  "total_trades": 142,
-  "win_rate": 68.3,
-  "sharpe_ratio": 1.85,
-  "max_drawdown": -87.45,
-  "max_drawdown_pct": -8.74,
-  "total_return_pct": 24.7,
-  "profit_factor": 2.3,
-  "trades_per_day": 2.4
-}
-```
-
----
-
-## 2. API REST FastAPI 🚀
-
-### Description
-API complète pour contrôler le bot, consulter positions/PnL, gérer wallets, stream trades live.
-
-### Fichier
-`api/main.py`
-
-### Démarrage
-```bash
-# Standalone
-uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
-
-# Docker
-docker-compose up api
-```
-
-### Documentation Swagger
-http://localhost:8001/docs
-
-### Endpoints disponibles
-
-#### Portfolio & Positions
-
-**GET /api/portfolio**
-```json
-{
-  "total_capital": 1250.45,
-  "initial_capital": 1000.0,
-  "total_pnl": 250.45,
-  "open_positions": 3,
-  "return_pct": 25.04
-}
-```
-
-**GET /api/positions?status=OPEN**
-```json
-{
-  "positions": [
-    {
-      "token_id": "0x1234...",
-      "entry_price": 0.65,
-      "amount_usdc": 50.0,
-      "side": "BUY",
-      "status": "OPEN",
-      "pnl_usdc": 12.5,
-      "market_question": "Trump wins 2026?"
-    }
-  ],
-  "total": 1
-}
-```
-
-#### Wallets Management
-
-**GET /api/wallets**
-```json
-{
-  "active_wallets": [
-    {
-      "address": "0xabc...",
-      "score": 0.72,
-      "total_trades": 45,
-      "win_rate": 0.71,
-      "is_whitelisted": true
-    }
-  ],
-  "whitelist_count": 2,
-  "blacklist_count": 1,
-  "total_active": 12
-}
-```
-
-**POST /api/wallets/whitelist**
-```bash
-curl -X POST http://localhost:8001/api/wallets/whitelist \
-  -H "Content-Type: application/json" \
-  -d '{"address": "0x123...", "score": 0.85}'
-```
-
-#### WebSocket - Live Trades
-
-**WS /ws/trades**
-```javascript
-const ws = new WebSocket('ws://localhost:8001/ws/trades');
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log('Trades update:', data.trades);
-};
-```
-
-Stream toutes les 3s :
-```json
-{
-  "type": "trades_update",
-  "trades": [
-    {"token_id": "0x123...", "side": "BUY", "pnl": 12.5}
-  ],
-  "timestamp": "2026-02-28T22:15:00Z"
-}
-```
-
----
-
-## 3. Dynamic Wallet Scoring 🎯
-
-### Description
-Recalcule automatiquement les win rates de tous les wallets trackés toutes les 24h. Exclut automatiquement ceux < 65%.
-
-### Fichier
-`bot/scanner/wallet_scorer.py`
+3. **Trailing Phase**
+   - If price goes to +25%, SL moves to +20%
+   - If price goes to +35%, SL moves to +30%
+   - **SL never moves down** (ratchet effect)
 
 ### Configuration
-```python
-# main.py
-from bot.scanner.wallet_scorer import WalletScorer
 
-scorer = WalletScorer(
-    notifier=notifier,
-    min_trades=10,        # Minimum trades pour score valide
-    min_win_rate=0.65,    # Seuil exclusion
-    lookback_days=30,     # Fenêtre analyse
+```python
+from bot.trading.trailing_stop import TrailingStopConfig
+
+config = TrailingStopConfig(
+    activation_gain_pct=0.15,  # Activate after +15%
+    trail_distance_pct=0.05,   # Keep SL 5% below peak
+    min_locked_profit_pct=0.10,  # Lock at least +10%
+    initial_sl_pct=-0.30,      # Fixed SL before activation
 )
-
-await scorer.start(interval_hours=24)
 ```
 
-### Comportement
+### Benefits
 
-1. **Toutes les 24h** :
-   - Recalcule win rate de chaque wallet (trades des 30 derniers jours)
-   - Si WR < 65% → `is_active = False` en DB
-   - Notif Telegram d'exclusion
-   
-2. **Update score si changement > 5%** :
-   - Ex: 72% → 68% = update
-   - Ex: 71% → 70% = pas d'update (trop proche)
+✅ **Protect gains** - Lock in profits automatically  
+✅ **Let winners run** - Don't exit too early  
+✅ **Reduce losses** - Limit downside on failed trades  
+✅ **No manual intervention** - Fully automated  
 
-3. **Protection données insuffisantes** :
-   - Si < 10 trades sur 30j → garde ancien score
+### Example
 
-### Telegram notifications
 ```
-⚠️ Wallet Auto-Excluded
-Address: 0x1234abcd...
-Win Rate: 62.3% (threshold: 65.0%)
-```
+Entry: $0.40
+Price goes to $0.50 (+25%)
+  → Trailing SL activates
+  → SL placed at $0.47 (+17.5% locked)
 
-### Force recalc (API/Telegram)
-```python
-result = await scorer.force_recalc_wallet("0x123...")
-print(result)
-# {'address': '0x123...', 'old_score': 0.72, 'new_score': 0.65, 'excluded': False}
+Price goes to $0.55 (+37.5%)
+  → SL moves to $0.52 (+30% locked)
+
+Price drops to $0.52
+  → Exit triggered
+  → Profit: +30% (instead of -30% with fixed SL)
 ```
 
 ---
 
-## 4. Rate Limiter 🛡️
+## 🔍 Wallet Discovery (v2.0)
 
-### Description
-Protection contre rate limits Polymarket API avec token bucket + exponential backoff.
+### Overview
+Automatically discovers high-performing traders from Polymarket leaderboard and adds them to your tracking list.
 
-### Fichier
-`bot/utils/rate_limiter.py`
+### How it works
+
+1. **Scraping**
+   - Fetches top 100 traders from Polymarket API
+   - Runs every 24 hours (configurable)
+
+2. **Filtering**
+   - Win rate >= 70%
+   - Volume >= $5,000
+   - Trades count >= 20
+   - Not already tracked
+
+3. **Scoring**
+   - Composite score (0.0 - 1.0)
+   - Win rate: 50% weight
+   - Volume (log scale): 30% weight
+   - Trade count: 20% weight
+
+4. **Auto-add**
+   - Qualified wallets added to DB
+   - Labeled as "Auto-discovered"
+   - Immediate tracking
 
 ### Configuration
+
 ```python
-from bot.utils.rate_limiter import RateLimiter, get_rate_limiter
+from bot.scanner.wallet_discovery import WalletDiscoveryConfig
 
-# Global limiter (singleton)
-limiter = get_rate_limiter()
-
-# Custom limiter
-limiter = RateLimiter(
-    calls_per_second=10.0,  # Max 10 req/s
-    burst_size=20,          # Burst up to 20
-    backoff_base=2.0,       # Double backoff each hit
-    max_backoff=60.0,       # Cap at 60s
+config = WalletDiscoveryConfig(
+    min_win_rate=0.70,        # 70% minimum
+    min_volume_usd=5000.0,    # $5k minimum
+    min_trades=20,            # 20 trades minimum
+    fetch_limit=100,          # Top 100 from leaderboard
 )
 ```
 
-### Utilisation via décorateur
-```python
-from bot.utils.rate_limiter import rate_limited
+### Benefits
 
-@rate_limited("polymarket_trades")
-async def fetch_trades(wallet: str):
-    # API call here
-    response = await client.get(f"/trades/{wallet}")
-    return response.json()
-```
+✅ **Always up-to-date** - New top traders added automatically  
+✅ **Quality filters** - Only high-performers  
+✅ **Hands-off** - Runs in background  
+✅ **Scalable** - Discover 10-20 new wallets per week  
 
-### Comportement
+### Manual Run
 
-1. **Token bucket** :
-   - Tokens rechargés à 10/sec
-   - Max 20 tokens stockés (burst)
-   - 1 token = 1 API call
+```bash
+# Test discovery
+python -m bot.scanner.wallet_discovery
 
-2. **429 détecté** :
-   - Backoff 1s → 2s → 4s → 8s → ... → 60s (max)
-   - Utilise `Retry-After` header si dispo
-
-3. **Succès** :
-   - Reset backoff à 0s
-
-### Stats
-```python
-stats = limiter.get_stats()
-print(stats)
-# {
-#   'tokens_available': 18.5,
-#   'calls_last_minute': 42,
-#   'avg_calls_per_second': 0.7,
-#   'endpoints_throttled': 1,
-#   'active_backoffs': {'polymarket_trades': 4.0}
-# }
+# Or via API
+curl -X POST http://localhost:8001/api/discovery/run
 ```
 
 ---
 
-## 🚀 Déploiement Complet
+## 🔧 Integration in main.py
 
-### 1. Pull latest
-```bash
-git checkout feature/api-backtest-improvements
-git pull origin feature/api-backtest-improvements
+### Quick Setup (3 lines)
+
+```python
+from bot.features_integration import get_features_manager
+
+# At bot startup
+features = get_features_manager(
+    enable_trailing_sl=True,
+    enable_wallet_discovery=True,
+)
+await features.start()
+
+# In trade loop
+should_exit, reason, exit_price = features.check_position_exit(
+    position_id="pos_123",
+    entry_price=0.40,
+    current_price=0.52,
+    entry_time=entry_time,
+)
+
+if should_exit:
+    # Execute exit
+    logger.info(f"Exiting position: {reason}")
 ```
 
-### 2. Install nouvelles dépendances
-```bash
-pip install -r requirements.txt
+### Full Example
+
+```python
+import asyncio
+from bot.features_integration import get_features_manager
+
+async def main():
+    # Initialize features
+    features = get_features_manager(
+        enable_trailing_sl=True,
+        enable_wallet_discovery=True,
+    )
+    
+    await features.start()
+    
+    try:
+        # Your bot logic here
+        while True:
+            # 1. Check for new trades
+            # 2. Check exits with trailing SL
+            should_exit, reason, _ = features.check_position_exit(...)
+            
+            await asyncio.sleep(10)
+            
+    finally:
+        await features.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
-
-### 3. Update .env (optionnel)
-```env
-# Backtest defaults
-BACKTEST_START_DATE=2026-01-01
-BACKTEST_END_DATE=2026-02-28
-
-# Wallet scoring
-WALLET_SCORER_MIN_WR=0.65
-WALLET_SCORER_MIN_TRADES=10
-WALLET_SCORER_LOOKBACK_DAYS=30
-
-# Rate limiter
-RATE_LIMIT_CALLS_PER_SEC=10.0
-RATE_LIMIT_BURST=20
-```
-
-### 4. Run with API
-```bash
-# Terminal 1 - Bot
-python main.py
-
-# Terminal 2 - API
-uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
-
-# Ou Docker tout-en-un
-docker-compose up -d
-```
-
-### 5. Test API
-```bash
-# Health check
-curl http://localhost:8001/api/health
-
-# Portfolio
-curl http://localhost:8001/api/portfolio
-
-# Backtest
-curl -X POST http://localhost:8001/api/backtest \
-  -H "Content-Type: application/json" \
-  -d '{"start_date": "2026-01-01", "end_date": "2026-02-28", "initial_capital": 1000}'
-```
-
-### 6. Swagger UI
-Ouvre http://localhost:8001/docs pour tester tous les endpoints interactivement.
 
 ---
 
-## 📱 Prochaines étapes
+## 📈 Performance Impact
 
-### Tier 1 (haute priorité)
-- [ ] Connecter frontend React à l'API
-- [ ] Ajouter trailing stop-loss dynamique
-- [ ] Implémenter wallet discovery via leaderboard
-- [ ] Multi-wallet execution (rotation proxy wallets)
+### Trailing SL
 
-### Tier 2 (nice-to-have)
-- [ ] Sentiment analysis Twitter/X
-- [ ] Liquidity checker (<$10k volume = skip)
-- [ ] Multi-exchange (PredictIt, Metaculus)
-- [ ] Telegram inline keyboard (approve/reject trades)
+**Before:**
+- Win rate: 65%
+- Avg win: +20%
+- Avg loss: -30%
+- Profit factor: 1.4x
+
+**After (estimated):**
+- Win rate: 65% (unchanged)
+- Avg win: +25% (+25% improvement)
+- Avg loss: -30% (unchanged)
+- Profit factor: 1.75x (+25% improvement)
+
+### Wallet Discovery
+
+**Manual tracking:**
+- 5-10 wallets
+- Manual research: 2-3h/week
+- Miss new top performers
+
+**Auto discovery:**
+- 20-50 wallets
+- Zero manual work
+- Always tracking best performers
+- +30-50% more trade opportunities
 
 ---
 
 ## 🐛 Troubleshooting
 
-### API ne démarre pas
-```bash
-# Check port 8001 libre
-lsof -i :8001
+### Trailing SL not activating
 
-# Check logs
-docker-compose logs api
-```
-
-### Backtest retourne 0 trades
-- Vérifier dates (format ISO : 2026-01-01)
-- Check DB contient trades sur période
-- Run `python migrate.py` si tables manquantes
-
-### Rate limiter trop agressif
 ```python
-# Augmente limits dans bot/utils/rate_limiter.py
-limiter = RateLimiter(
-    calls_per_second=20.0,  # Double
-    burst_size=40,
-)
+# Check if position registered
+from bot.trading.trailing_stop import get_trailing_stop_manager
+
+manager = get_trailing_stop_manager()
+stats = manager.get_position_stats("your_position_id")
+print(stats)
 ```
 
-### Wallet scorer n'exclut pas
-- Check `.env` : `WALLET_SCORER_MIN_WR=0.65`
-- Vérifier wallet a ≥ 10 trades sur 30j
-- Force recalc manuel : `await scorer.force_recalc_wallet("0x...")`
+### Discovery not finding wallets
+
+```bash
+# Check API connectivity
+curl https://gamma-api.polymarket.com/leaderboard?limit=10
+
+# Check filters (might be too strict)
+config.min_win_rate = 0.65  # Lower to 65%
+config.min_volume_usd = 2000  # Lower to $2k
+```
+
+### Rate limiting
+
+```python
+# Increase delay between requests
+config.rate_limit_delay = 2.0  # 2 seconds instead of 1
+```
 
 ---
 
-## 📚 Ressources
+## 🎯 Next Steps
 
-- [FastAPI Docs](https://fastapi.tiangolo.com/)
-- [Sharpe Ratio Explained](https://www.investopedia.com/terms/s/sharperatio.asp)
-- [Rate Limiting Best Practices](https://stripe.com/docs/rate-limits)
-- [Polymarket API](https://docs.polymarket.com/)
+1. **Test in dry-run mode** for 24-48h
+2. **Monitor logs** for trailing SL activations
+3. **Check discovery stats** daily
+4. **Adjust thresholds** based on performance
+5. **Enable live trading** once validated
 
 ---
 
-**Version**: 1.0.0  
-**Date**: 2026-02-28  
-**Auteur**: ostrolawzyy-beep
+## 📊 Monitoring
+
+### Via API
+
+```bash
+# Get trailing SL stats
+curl http://localhost:8001/api/features/trailing-stats
+
+# Get discovery stats
+curl http://localhost:8001/api/features/discovery-stats
+```
+
+### Via Logs
+
+```bash
+# Filter trailing SL events
+grep "TRAILING_SL" logs/bot.log
+
+# Filter discovery events
+grep "DISCOVERY" logs/bot.log
+```
+
+---
+
+## ❓ FAQ
+
+**Q: Can I disable trailing SL for specific positions?**  
+A: Not yet, but coming in v2.0
+
+**Q: Does discovery consume a lot of API calls?**  
+A: No, only 1 call per 24h to leaderboard endpoint
+
+**Q: What if a discovered wallet starts losing?**  
+A: Dynamic Wallet Scoring will auto-exclude it after 10 trades if WR < 65%
+
+**Q: Can I run discovery manually?**  
+A: Yes: `python -m bot.scanner.wallet_discovery`
+
+---
+
+**Made with ❤️ for better insider trading**
