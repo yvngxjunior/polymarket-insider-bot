@@ -37,7 +37,7 @@ const LiveStream = () => {
   }, [])
 
   return (
-    <section className="border-sharp sticky top-8">
+    <section className="border-sharp sticky top-8 transition-border hover-border-brand">
       {/* Header */}
       <div className="border-b border-ink p-8">
         <div className="flex items-center justify-between mb-4">
@@ -45,9 +45,10 @@ const LiveStream = () => {
             Live
           </h4>
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 ${
-              isConnected ? 'bg-brand animate-pulse-slow' : 'bg-muted'
-            }`}></div>
+            <div className={`
+              w-2 h-2 
+              ${isConnected ? 'bg-brand animate-pulse-slow' : 'bg-muted'}
+            `}></div>
             <span className="font-mono text-xs text-muted uppercase">
               {isConnected ? 'Connected' : 'Offline'}
             </span>
@@ -63,12 +64,21 @@ const LiveStream = () => {
         {trades.length > 0 ? (
           <div className="space-y-6">
             {trades.slice(0, 5).map((trade, idx) => (
-              <div key={idx} className="border-b border-ink pb-6 last:border-0">
+              <div 
+                key={idx} 
+                className="
+                  border-b border-ink pb-6 last:border-0 
+                  transition-sharp hover-lift
+                  animate-slide-in
+                "
+                style={{ animationDelay: `${idx * 0.1}s` }}
+              >
                 {/* Side */}
                 <div className="mb-3">
-                  <span className={`font-mono text-xs uppercase tracking-widest ${
-                    trade.side === 'BUY' ? 'text-brand' : 'text-ink'
-                  }`}>
+                  <span className={`
+                    font-mono text-xs uppercase tracking-widest 
+                    ${trade.side === 'BUY' ? 'text-brand' : 'text-ink'}
+                  `}>
                     {trade.side}
                   </span>
                 </div>
@@ -95,9 +105,10 @@ const LiveStream = () => {
                 {/* PnL if exists */}
                 {trade.pnl !== null && trade.pnl !== undefined && (
                   <div className="mt-3 pt-3 border-t border-ink">
-                    <p className={`font-mono text-xs ${
-                      trade.pnl >= 0 ? 'text-brand' : 'text-ink'
-                    }`}>
+                    <p className={`
+                      font-mono text-xs 
+                      ${trade.pnl >= 0 ? 'text-brand' : 'text-ink'}
+                    `}>
                       P&L: {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
                     </p>
                   </div>
@@ -107,7 +118,7 @@ const LiveStream = () => {
           </div>
         ) : (
           <div className="py-16 text-center">
-            <p className="font-mono text-xs text-muted uppercase tracking-wide">
+            <p className="font-mono text-xs text-muted uppercase tracking-wide animate-pulse-slow">
               {isConnected ? 'Awaiting trades...' : 'Connecting...'}
             </p>
           </div>
