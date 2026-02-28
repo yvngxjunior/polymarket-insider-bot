@@ -163,6 +163,7 @@ async def get_positions(status: Optional[str] = None) -> Dict[str, Any]:
 async def get_wallets() -> Dict[str, Any]:
     """Get tracked wallets"""
     with get_db() as db:
+        # FIX: Get ALL active wallets, not just auto-discovered ones
         active_wallets = (
             db.query(TrackedWallet)
             .filter(TrackedWallet.is_active == True)  # noqa: E712
@@ -177,7 +178,7 @@ async def get_wallets() -> Dict[str, Any]:
         "active_wallets": [
             {
                 "address": w.address,
-                "label": w.label,
+                "label": w.label or f"Wallet {w.address[:6]}...",
                 "score": float(w.score or 0),
                 "total_trades": w.total_trades or 0,
                 "win_rate": float(w.win_rate or 0),
@@ -364,28 +365,32 @@ async def run_wallet_discovery(request: DiscoveryRequest) -> Dict[str, Any]:
 async def get_discovery_stats() -> Dict[str, Any]:
     """Get wallet discovery statistics"""
     with get_db() as db:
-        # Get auto-discovered wallets
-        auto_discovered = (
+        # Count all wallets with high scores (likely auto-discovered)
+        high_score_wallets = (
             db.query(TrackedWallet)
-            .filter(TrackedWallet.label.like("%Auto-discovered%"))
+            .filter(
+                TrackedWallet.is_active == True,  # noqa: E712
+                TrackedWallet.score >= 0.85
+            )
+            .order_by(TrackedWallet.score.desc())
             .all()
         )
         
-        total_pnl = sum(float(w.total_profit_usd or 0) for w in auto_discovered)
-        avg_score = sum(float(w.score or 0) for w in auto_discovered) / len(auto_discovered) if auto_discovered else 0
+        total_pnl = sum(float(w.total_profit_usd or 0) for w in high_score_wallets)
+        avg_score = sum(float(w.score or 0) for w in high_score_wallets) / len(high_score_wallets) if high_score_wallets else 0
         
     return {
-        "total_discovered": len(auto_discovered),
+        "total_discovered": len(high_score_wallets),
         "total_pnl_usd": round(total_pnl, 2),
         "avg_score": round(avg_score, 2),
         "top_wallets": [
             {
                 "address": w.address[:10] + "...",
-                "label": w.label,
+                "label": w.label or f"Wallet {w.address[:6]}...",
                 "score": float(w.score or 0),
                 "pnl_usd": float(w.total_profit_usd or 0),
             }
-            for w in sorted(auto_discovered, key=lambda x: x.score or 0, reverse=True)[:10]
+            for w in high_score_wallets[:10]
         ],
     }
 
@@ -395,9 +400,12 @@ async def get_features_status() -> Dict[str, Any]:
     manager = get_trailing_stop_manager()
     
     with get_db() as db:
-        auto_discovered_count = (
+        high_score_count = (
             db.query(TrackedWallet)
-            .filter(TrackedWallet.label.like("%Auto-discovered%"))
+            .filter(
+                TrackedWallet.is_active == True,  # noqa: E712
+                TrackedWallet.score >= 0.85
+            )
             .count()
         )
     
@@ -408,7 +416,7 @@ async def get_features_status() -> Dict[str, Any]:
         },
         "wallet_discovery": {
             "enabled": True,
-            "auto_discovered_wallets": auto_discovered_count,
+            "auto_discovered_wallets": high_score_count,
             "next_run": "every 24h",
         },
         "api_version": "1.1.0",
