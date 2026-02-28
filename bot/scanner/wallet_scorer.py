@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from bot.config import get_settings
-from bot.database import get_db, TrackedWallet, Trade
+from bot.database import get_db, TrackedWallet, CopiedTrade
 from bot.notifications.telegram import TelegramNotifier
 from bot.utils.logger import logger
 
@@ -139,11 +139,11 @@ class WalletScorer:
         with get_db() as db:
             # Get recent trades from this wallet
             trades = (
-                db.query(Trade)
+                db.query(CopiedTrade)
                 .filter(
-                    Trade.source_wallet == wallet_address,
-                    Trade.timestamp >= cutoff_date,
-                    Trade.pnl_usdc.isnot(None),
+                    CopiedTrade.source_wallet_address == wallet_address,
+                    CopiedTrade.created_at >= cutoff_date,
+                    CopiedTrade.pnl_usdc.isnot(None),
                 )
                 .all()
             )
