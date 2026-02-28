@@ -35,6 +35,7 @@ python-dateutil==2.9.0.post0
 
 # Logging
 coloredlogs==15.0.1
+loguru==0.7.3
 
 # Redis (optional)
 redis==5.2.1
