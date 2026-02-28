@@ -171,24 +171,26 @@ async def get_wallets() -> Dict[str, Any]:
             .all()
         )
         
-    whitelist = settings.get_whitelist()
-    blacklist = settings.get_blacklist()
-    
-    return {
-        "active_wallets": [
+        # FIX: Materialize data INSIDE the session before returning
+        wallet_list = [
             {
                 "address": w.address,
                 "label": w.label or f"Wallet {w.address[:6]}...",
                 "score": float(w.score or 0),
                 "total_trades": w.total_trades or 0,
                 "win_rate": float(w.win_rate or 0),
-                "is_whitelisted": w.address.lower() in whitelist,
+                "is_whitelisted": w.address.lower() in settings.get_whitelist(),
             }
             for w in active_wallets
-        ],
-        "whitelist_count": len(whitelist),
+        ]
+        
+    blacklist = settings.get_blacklist()
+    
+    return {
+        "active_wallets": wallet_list,
+        "whitelist_count": len(settings.get_whitelist()),
         "blacklist_count": len(blacklist),
-        "total_active": len(active_wallets),
+        "total_active": len(wallet_list),
     }
 
 @app.post("/api/wallets/whitelist")
@@ -376,21 +378,32 @@ async def get_discovery_stats() -> Dict[str, Any]:
             .all()
         )
         
-        total_pnl = sum(float(w.total_profit_usd or 0) for w in high_score_wallets)
-        avg_score = sum(float(w.score or 0) for w in high_score_wallets) / len(high_score_wallets) if high_score_wallets else 0
-        
-    return {
-        "total_discovered": len(high_score_wallets),
-        "total_pnl_usd": round(total_pnl, 2),
-        "avg_score": round(avg_score, 2),
-        "top_wallets": [
+        # Materialize data inside session
+        wallet_data = [
             {
-                "address": w.address[:10] + "...",
+                "address": w.address,
                 "label": w.label or f"Wallet {w.address[:6]}...",
                 "score": float(w.score or 0),
                 "pnl_usd": float(w.total_profit_usd or 0),
             }
-            for w in high_score_wallets[:10]
+            for w in high_score_wallets
+        ]
+        
+    total_pnl = sum(w["pnl_usd"] for w in wallet_data)
+    avg_score = sum(w["score"] for w in wallet_data) / len(wallet_data) if wallet_data else 0
+        
+    return {
+        "total_discovered": len(wallet_data),
+        "total_pnl_usd": round(total_pnl, 2),
+        "avg_score": round(avg_score, 2),
+        "top_wallets": [
+            {
+                "address": w["address"][:10] + "...",
+                "label": w["label"],
+                "score": w["score"],
+                "pnl_usd": w["pnl_usd"],
+            }
+            for w in wallet_data[:10]
         ],
     }
 
