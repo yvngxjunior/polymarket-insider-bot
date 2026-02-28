@@ -20,20 +20,20 @@ function App() {
     }
 
     loadStats()
-    const interval = setInterval(loadStats, 10000) // Refresh every 10s
+    const interval = setInterval(loadStats, 10000)
     return () => clearInterval(interval)
   }, [])
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <div className="text-2xl text-slate-400">Loading...</div>
+      <div className="min-h-screen bg-paper flex items-center justify-center">
+        <div className="font-display text-6xl text-ink">Loading...</div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-slate-900">
+    <div className="min-h-screen bg-paper">
       <Dashboard stats={stats} />
     </div>
   )

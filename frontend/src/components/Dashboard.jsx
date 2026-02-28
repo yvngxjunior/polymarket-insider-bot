@@ -1,10 +1,8 @@
 import { useState, useEffect } from 'react'
-import { Activity, TrendingUp, Wallet, AlertCircle } from 'lucide-react'
-import StatsCard from './StatsCard'
-import TrailingSLChart from './TrailingSLChart'
-import PositionsTable from './PositionsTable'
-import WalletsTable from './WalletsTable'
-import LiveTradesStream from './LiveTradesStream'
+import MetricsGrid from './MetricsGrid'
+import TrailingSLPanel from './TrailingSLPanel'
+import WalletsPanel from './WalletsPanel'
+import LiveStream from './LiveStream'
 import { fetchAPI } from '../utils/api'
 
 const Dashboard = ({ stats }) => {
@@ -30,69 +28,59 @@ const Dashboard = ({ stats }) => {
     }
 
     loadData()
-    const interval = setInterval(loadData, 5000) // Refresh every 5s
+    const interval = setInterval(loadData, 5000)
     return () => clearInterval(interval)
   }, [])
 
   return (
-    <div className="min-h-screen bg-slate-900 p-6">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
-          <Activity className="text-indigo-500" size={40} />
-          PolyInsider Dashboard
-        </h1>
-        <p className="text-slate-400 text-lg">Real-time bot monitoring with Trailing SL</p>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <StatsCard
-          title="Total Capital"
-          value={`$${portfolio?.total_capital?.toFixed(2) || '0.00'}`}
-          icon={<Wallet className="text-indigo-500" />}
-          trend={portfolio?.return_pct}
-        />
-        <StatsCard
-          title="Total PnL"
-          value={`$${portfolio?.total_pnl?.toFixed(2) || '0.00'}`}
-          icon={<TrendingUp className={portfolio?.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'} />}
-          trend={portfolio?.return_pct}
-          positive={portfolio?.total_pnl >= 0}
-        />
-        <StatsCard
-          title="Trailing SL Active"
-          value={stats?.trailing_sl?.tracked_positions || 0}
-          icon={<Activity className="text-yellow-500" />}
-          subtitle="positions tracked"
-        />
-        <StatsCard
-          title="Auto-Discovered"
-          value={stats?.wallet_discovery?.auto_discovered_wallets || 0}
-          icon={<AlertCircle className="text-purple-500" />}
-          subtitle="top traders"
-        />
-      </div>
-
-      {/* Trailing SL Chart */}
-      <div className="mb-8">
-        <TrailingSLChart positions={trailingPositions} />
-      </div>
-
-      {/* Live Trades + Tables */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-        <div className="lg:col-span-2">
-          <LiveTradesStream />
+    <div className="min-h-screen bg-paper px-8 py-16">
+      {/* Header - Asymmetric */}
+      <header className="mb-40 animate-fade-in-up">
+        <div className="border-b border-ink pb-8">
+          <h1 className="font-display text-display text-ink mb-2">
+            PolyInsider
+          </h1>
+          <p className="font-mono text-sm text-muted tracking-wide uppercase">
+            Real-time Trading Intelligence
+          </p>
         </div>
-        <div>
-          <WalletsTable wallets={wallets.slice(0, 5)} />
+      </header>
+
+      {/* Metrics - Grid System */}
+      <MetricsGrid 
+        portfolio={portfolio} 
+        stats={stats} 
+      />
+
+      {/* Asymmetric Two-Column */}
+      <div className="grid grid-cols-12 gap-16 mb-40">
+        {/* 70% - Trailing SL */}
+        <div className="col-span-7 animate-fade-in-up stagger-3">
+          <TrailingSLPanel positions={trailingPositions} />
+        </div>
+
+        {/* 30% - Live Stream */}
+        <div className="col-span-5 animate-fade-in-up stagger-4">
+          <LiveStream />
         </div>
       </div>
 
-      {/* Positions Table Full Width */}
-      <div>
-        <PositionsTable positions={trailingPositions} />
+      {/* Full Width - Wallets */}
+      <div className="animate-fade-in-up stagger-5">
+        <WalletsPanel wallets={wallets} />
       </div>
+
+      {/* Footer */}
+      <footer className="mt-40 pt-16 border-t border-ink">
+        <div className="flex justify-between items-center">
+          <p className="font-mono text-xs text-muted uppercase tracking-wider">
+            v3.2.0 — Trading Bot
+          </p>
+          <p className="font-mono text-xs text-muted">
+            Last update: {new Date().toLocaleTimeString()}
+          </p>
+        </div>
+      </footer>
     </div>
   )
 }
