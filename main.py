@@ -1,7 +1,7 @@
 """
-PolyInsider Bot v3.1
+PolyInsider Bot v3.2
 =====================
-Architecture 7 phases + 3 background tasks:
+Architecture 7 phases + 4 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
@@ -12,6 +12,11 @@ Architecture 7 phases + 3 background tasks:
   └ WalletRefresher    — refresh + discovery wallets      [background, 60min]
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
+  └ FeaturesManager    — Trailing SL + Auto Discovery      [background, NEW]
+
+v3.2 NEW FEATURES:
+  ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
+  ✨ AUTO WALLET DISCOVERY — Scrapes Polymarket leaderboard every 24h
 
 v2.8 fixes:
   - FIX MAIN-2/3   float(None) crash + refresher.stop() manquant
@@ -22,7 +27,7 @@ v2.8 fixes:
 v2.9 fixes:
   - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
   - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
-  - FIX RISK-6     INSERT portfolio_snapshot jamais commitié
+  - FIX RISK-6     INSERT portfolio_snapshot jamais committé
   - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
   - FIX FILTER-1   rate-limit query status case-sensitive
 
@@ -65,6 +70,9 @@ from bot.notifications.health import HealthMonitor
 from bot.analytics.performance import PerformanceTracker
 from bot.ai.llm_agent import LLMAgent
 from bot.utils.logger import logger
+
+# NEW v3.2: Import features manager
+from bot.features_integration import get_features_manager
 
 settings = get_settings()
 
@@ -372,7 +380,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v3.1")
+    logger.info("  PolyInsider Bot v3.2")
     logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -385,6 +393,9 @@ async def run() -> None:
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
     logger.info("  Convergence boost (x1.5): ON 🔥")
+    # NEW v3.2
+    logger.info("  ✨ Trailing Stop-Loss:     ON 📈 (activates @ +15% gain)")
+    logger.info("  ✨ Auto Wallet Discovery:  ON 🔍 (every 24h)")
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -443,6 +454,12 @@ async def run() -> None:
         interval_minutes=60,
         wallet_scanner=wallet_scanner,
     )
+    
+    # NEW v3.2: Initialize features manager (Trailing SL + Auto Discovery)
+    features_manager = get_features_manager(
+        enable_trailing_sl=True,
+        enable_wallet_discovery=True,
+    )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
 
@@ -460,6 +477,8 @@ async def run() -> None:
     await refresher.start()
     await exit_manager.start()
     await health_monitor.start()
+    await features_manager.start()  # NEW v3.2: Start Trailing SL + Discovery
+    
     try:
         await cmd_handler.start_polling()
     except Exception as e:
@@ -494,6 +513,7 @@ async def run() -> None:
         refresher.stop(),
         exit_manager.stop(),
         health_monitor.stop(),
+        features_manager.stop(),  # NEW v3.2: Stop features manager
         cmd_handler.stop(),
         client.close(),
         engine.close(),
