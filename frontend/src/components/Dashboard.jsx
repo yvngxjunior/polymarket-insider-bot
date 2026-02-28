@@ -4,6 +4,7 @@ import StatsCard from './StatsCard'
 import TrailingSLChart from './TrailingSLChart'
 import PositionsTable from './PositionsTable'
 import WalletsTable from './WalletsTable'
+import LiveTradesStream from './LiveTradesStream'
 import { fetchAPI } from '../utils/api'
 
 const Dashboard = ({ stats }) => {
@@ -78,10 +79,19 @@ const Dashboard = ({ stats }) => {
         <TrailingSLChart positions={trailingPositions} />
       </div>
 
-      {/* Tables */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Live Trades + Tables */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+        <div className="lg:col-span-2">
+          <LiveTradesStream />
+        </div>
+        <div>
+          <WalletsTable wallets={wallets.slice(0, 5)} />
+        </div>
+      </div>
+
+      {/* Positions Table Full Width */}
+      <div>
         <PositionsTable positions={trailingPositions} />
-        <WalletsTable wallets={wallets.slice(0, 10)} />
       </div>
     </div>
   )
