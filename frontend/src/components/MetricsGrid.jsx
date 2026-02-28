@@ -1,4 +1,9 @@
+import { useEffect, useState } from 'react'
+
 const MetricsGrid = ({ portfolio, stats }) => {
+  const [prevValues, setPrevValues] = useState({})
+  const [updatedIndices, setUpdatedIndices] = useState(new Set())
+
   const metrics = [
     {
       label: 'Capital',
@@ -23,13 +28,38 @@ const MetricsGrid = ({ portfolio, stats }) => {
     },
   ]
 
+  // Detect value changes
+  useEffect(() => {
+    const newUpdated = new Set()
+    metrics.forEach((metric, idx) => {
+      if (prevValues[idx] !== undefined && prevValues[idx] !== metric.value) {
+        newUpdated.add(idx)
+      }
+    })
+    
+    if (newUpdated.size > 0) {
+      setUpdatedIndices(newUpdated)
+      setTimeout(() => setUpdatedIndices(new Set()), 300)
+    }
+
+    const newPrevValues = {}
+    metrics.forEach((metric, idx) => {
+      newPrevValues[idx] = metric.value
+    })
+    setPrevValues(newPrevValues)
+  }, [portfolio, stats])
+
   return (
-    <section className="mb-40">
+    <section className="mb-40 overlap-section">
       <div className="grid grid-cols-4 gap-16">
         {metrics.map((metric, idx) => (
           <div 
             key={idx} 
-            className={`border-sharp p-12 transition-sharp hover:border-brand animate-fade-in-up stagger-${idx + 1}`}
+            className={`
+              border-sharp p-12 
+              transition-border hover-border-thick hover-border-brand hover-lift
+              animate-fade-in-up stagger-${idx + 1}
+            `}
           >
             {/* Label */}
             <div className="mb-8">
@@ -38,11 +68,13 @@ const MetricsGrid = ({ portfolio, stats }) => {
               </p>
             </div>
 
-            {/* Value - MASSIVE */}
+            {/* Value - MASSIVE with animation */}
             <div className="mb-4">
-              <h2 className={`font-display text-6xl leading-none ${
-                metric.accent ? 'text-brand' : 'text-ink'
-              }`}>
+              <h2 className={`
+                font-display text-6xl leading-none
+                ${metric.accent ? 'text-brand' : 'text-ink'}
+                ${updatedIndices.has(idx) ? 'animate-number-tick' : ''}
+              `}>
                 {metric.value}
               </h2>
             </div>
