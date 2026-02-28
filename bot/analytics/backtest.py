@@ -1,6 +1,5 @@
 """Backtest Engine v1.0 - Replay historical trades with Kelly/TP-SL"""
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pandas as pd
 
