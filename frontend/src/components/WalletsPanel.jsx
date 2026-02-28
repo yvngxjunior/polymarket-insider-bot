@@ -8,7 +8,7 @@ const WalletsPanel = ({ wallets }) => {
 
   return (
     <ScrollReveal>
-      <section className="border-sharp overlap-section-target">
+      <section className="border-sharp">
         {/* Header */}
         <div className="border-b border-ink p-12">
           <div className="flex items-end justify-between">

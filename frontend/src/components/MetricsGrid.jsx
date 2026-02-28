@@ -50,7 +50,7 @@ const MetricsGrid = ({ portfolio, stats }) => {
   }, [portfolio, stats])
 
   return (
-    <section className="mb-40 overlap-section">
+    <section className="mb-40">
       <div className="grid grid-cols-4 gap-16">
         {metrics.map((metric, idx) => (
           <div 
