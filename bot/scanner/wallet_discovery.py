@@ -15,13 +15,13 @@ class WalletDiscoveryConfig:
     """Configuration for wallet discovery"""
     
     # Filtering criteria
-    min_win_rate: float = 0.70  # 70% minimum win rate
+    min_win_rate: float = 0.60  # 60% minimum (will calculate from pnl/vol)
     min_volume_usd: float = 5000.0  # $5k minimum volume
-    min_trades: int = 20  # 20 trades minimum
+    min_pnl_usd: float = 500.0  # $500 minimum profit
     
-    # Leaderboard settings (Updated Feb 2026)
-    leaderboard_url: str = "https://data-api.polymarket.com/leaderboard"
-    fetch_limit: int = 100  # Top 100 traders
+    # Leaderboard settings (Updated to v1 API)
+    leaderboard_url: str = "https://data-api.polymarket.com/v1/leaderboard"
+    fetch_limit: int = 50  # Max 50 per request (API limit)
     
     # Rate limiting
     rate_limit_delay: float = 1.0  # Seconds between requests
@@ -53,7 +53,8 @@ class WalletDiscovery:
         self,
         period: str = "ALL",  # DAY, WEEK, MONTH, ALL
         order_by: str = "PNL",  # PNL or VOL
-        limit: int = 100,
+        limit: int = 50,
+        offset: int = 0,
     ) -> List[Dict]:
         """
         Fetch traders from Polymarket leaderboard.
@@ -61,7 +62,8 @@ class WalletDiscovery:
         Args:
             period: "DAY", "WEEK", "MONTH", "ALL"
             order_by: "PNL" or "VOL"
-            limit: Number of traders to fetch
+            limit: Number of traders to fetch (max 50)
+            offset: Pagination offset
             
         Returns:
             List of trader dicts with stats
@@ -73,7 +75,8 @@ class WalletDiscovery:
                 params = {
                     "period": period,
                     "orderBy": order_by,
-                    "limit": limit,
+                    "limit": min(limit, 50),  # API max is 50
+                    "offset": offset,
                     "category": "OVERALL",
                 }
                 
@@ -84,14 +87,12 @@ class WalletDiscovery:
                     if resp.status == 200:
                         data = await resp.json()
                         
-                        # API returns {"leaderboard": [...]} or just [...]
-                        traders = data.get("leaderboard", data) if isinstance(data, dict) else data
-                        
-                        if not isinstance(traders, list):
-                            traders = []
+                        # API returns array directly
+                        traders = data if isinstance(data, list) else []
                             
                         logger.info(
-                            f"[DISCOVERY] Fetched {len(traders)} traders from leaderboard"
+                            f"[DISCOVERY] Fetched {len(traders)} traders from leaderboard "
+                            f"(offset={offset})"
                         )
                         return traders
                         
@@ -123,10 +124,15 @@ class WalletDiscovery:
         """
         Filter traders based on performance criteria.
         
+        API Response fields:
+        - proxyWallet: Address
+        - vol: Volume in USDC
+        - pnl: Profit/loss in USDC
+        - rank: Leaderboard position
+        
         Filters:
-        - Win rate >= min_win_rate
+        - PnL >= min_pnl_usd
         - Volume >= min_volume_usd
-        - Trade count >= min_trades
         - Not already tracked
         
         Returns:
@@ -138,39 +144,38 @@ class WalletDiscovery:
         qualified = []
         
         for trader in traders:
-            # API field names (updated for Data API)
-            address = trader.get("address", trader.get("user", ""))
+            # API field: proxyWallet
+            address = trader.get("proxyWallet", "")
             if not address or address.lower() in existing:
                 continue
                 
-            # Extract stats - handle multiple field name variations
-            win_rate = trader.get("winRate", trader.get("win_rate", 0.0))
+            # Extract stats from API
+            pnl = trader.get("pnl", 0.0)
+            volume = trader.get("vol", 0.0)
+            rank = trader.get("rank", 999)
+            username = trader.get("userName", "Unknown")
             
-            # Volume in USDC
-            volume = trader.get("volume", trader.get("volumeTraded", 0.0))
+            # Calculate win rate estimate from pnl/volume
+            # If PnL is positive and significant, assume good WR
+            estimated_win_rate = 0.5 + (pnl / max(volume, 1)) * 0.5
+            estimated_win_rate = max(0.0, min(estimated_win_rate, 1.0))
             
-            # Trade count
-            trades_count = trader.get("trades", trader.get("tradesCount", 0))
-            
-            # Convert percentages if needed (some APIs return 0-100 instead of 0-1)
-            if win_rate > 1.0:
-                win_rate = win_rate / 100.0
-                
             # Apply filters
             if (
-                win_rate >= self.config.min_win_rate
+                pnl >= self.config.min_pnl_usd
                 and volume >= self.config.min_volume_usd
-                and trades_count >= self.config.min_trades
+                and estimated_win_rate >= self.config.min_win_rate
             ):
-                score = self._calculate_score(win_rate, volume, trades_count)
+                score = self._calculate_score(estimated_win_rate, volume, pnl)
                 qualified.append({
                     "address": address,
-                    "win_rate": win_rate,
+                    "win_rate": estimated_win_rate,
                     "volume_usd": volume,
-                    "trades_count": trades_count,
+                    "pnl": pnl,
+                    "rank": rank,
+                    "username": username,
                     "score": score,
                     "source": "leaderboard_discovery",
-                    "pnl": trader.get("pnl", 0.0),
                 })
                 
         # Sort by score descending
@@ -182,33 +187,33 @@ class WalletDiscovery:
         
         return qualified
         
-    def _calculate_score(self, win_rate: float, volume: float, trades_count: int) -> float:
+    def _calculate_score(self, win_rate: float, volume: float, pnl: float) -> float:
         """
         Calculate composite quality score.
         
         Formula:
-        - Win rate: 50% weight
+        - Win rate (estimated): 40% weight
         - Volume (log scale): 30% weight
-        - Trade count (capped at 100): 20% weight
+        - PnL: 30% weight
         
         Returns:
             Score between 0.0 and 1.0
         """
         import math
         
-        # Win rate component (0.0 - 0.5)
-        wr_component = win_rate * 0.5
+        # Win rate component (0.0 - 0.4)
+        wr_component = win_rate * 0.4
         
         # Volume component (0.0 - 0.3)
-        # log10(5000) = 3.7, log10(100000) = 5.0
         volume_normalized = math.log10(max(volume, 1)) / 5.0
         volume_component = min(volume_normalized, 1.0) * 0.3
         
-        # Trade count component (0.0 - 0.2)
-        trades_normalized = min(trades_count / 100, 1.0)
-        trades_component = trades_normalized * 0.2
+        # PnL component (0.0 - 0.3)
+        # Normalize: $5k = 0.5, $50k = 1.0
+        pnl_normalized = math.log10(max(pnl, 1)) / 4.7  # log10(50000) ≈ 4.7
+        pnl_component = min(pnl_normalized, 1.0) * 0.3
         
-        total_score = wr_component + volume_component + trades_component
+        total_score = wr_component + volume_component + pnl_component
         return min(total_score, 1.0)
         
     async def add_wallets_to_db(self, wallets: List[Dict]) -> int:
@@ -225,10 +230,10 @@ class WalletDiscovery:
                 try:
                     wallet = TrackedWallet(
                         address=wallet_data["address"],
-                        label=f"Auto-discovered (WR={wallet_data['win_rate']:.0%})",
+                        label=f"@{wallet_data.get('username', 'Unknown')} (Rank #{wallet_data.get('rank', '?')})",
                         win_rate=wallet_data["win_rate"],
-                        total_trades=wallet_data["trades_count"],
-                        total_profit_usd=wallet_data.get("pnl", wallet_data["volume_usd"]),
+                        total_trades=0,  # Not provided by API
+                        total_profit_usd=wallet_data["pnl"],
                         score=wallet_data["score"],
                         is_active=True,
                         is_whale=wallet_data["volume_usd"] > 50000,
@@ -239,9 +244,9 @@ class WalletDiscovery:
                     added_count += 1
                     
                     logger.info(
-                        f"[DISCOVERY] ➕ Added {wallet_data['address'][:10]}... | "
-                        f"WR={wallet_data['win_rate']:.0%} | Score={wallet_data['score']:.2f} | "
-                        f"PnL=${wallet_data.get('pnl', 0):.0f}"
+                        f"[DISCOVERY] ✅ Added {wallet_data['address'][:10]}... | "
+                        f"@{wallet_data.get('username', 'Unknown')} | "
+                        f"PnL=${wallet_data['pnl']:.0f} | Score={wallet_data['score']:.2f}"
                     )
                     
                 except Exception as e:
@@ -257,6 +262,7 @@ class WalletDiscovery:
         self,
         period: str = "ALL",
         auto_add: bool = True,
+        fetch_pages: int = 2,  # Fetch 2 pages = 100 traders
     ) -> Dict[str, int]:
         """
         Run complete discovery cycle.
@@ -264,21 +270,33 @@ class WalletDiscovery:
         Args:
             period: Leaderboard period to query (DAY, WEEK, MONTH, ALL)
             auto_add: If True, automatically add qualified wallets to DB
+            fetch_pages: Number of pages to fetch (50 traders per page)
             
         Returns:
             Stats dict with counts
         """
         logger.info(f"[DISCOVERY] Starting discovery cycle (period={period})...")
         
-        # Fetch leaderboard
-        traders = await self.fetch_leaderboard(period=period, limit=self.config.fetch_limit)
+        # Fetch multiple pages
+        all_traders = []
+        for page in range(fetch_pages):
+            offset = page * 50
+            traders = await self.fetch_leaderboard(
+                period=period,
+                limit=50,
+                offset=offset,
+            )
+            if not traders:
+                break
+            all_traders.extend(traders)
+            await asyncio.sleep(self.config.rate_limit_delay)  # Rate limit
         
-        if not traders:
+        if not all_traders:
             logger.warning("[DISCOVERY] No traders fetched")
             return {"fetched": 0, "qualified": 0, "added": 0}
             
         # Filter qualified
-        qualified = self.filter_quality_wallets(traders)
+        qualified = self.filter_quality_wallets(all_traders)
         
         # Add to DB if enabled
         added = 0
@@ -286,37 +304,34 @@ class WalletDiscovery:
             added = await self.add_wallets_to_db(qualified)
             
         logger.info(
-            f"✅ [DISCOVERY] Complete | Fetched={len(traders)} | "
+            f"✅ [DISCOVERY] Complete | Fetched={len(all_traders)} | "
             f"Qualified={len(qualified)} | Added={added}"
         )
         
         return {
-            "fetched": len(traders),
+            "fetched": len(all_traders),
             "qualified": len(qualified),
             "added": added,
         }
 
 
 async def discover_wallets(
-    min_win_rate: float = 0.70,
+    min_pnl_usd: float = 500.0,
     min_volume_usd: float = 5000.0,
-    min_trades: int = 20,
 ) -> Dict[str, int]:
     """
     Convenience function to run wallet discovery.
     
     Args:
-        min_win_rate: Minimum win rate filter
+        min_pnl_usd: Minimum profit filter
         min_volume_usd: Minimum volume filter
-        min_trades: Minimum trade count filter
         
     Returns:
         Discovery stats
     """
     config = WalletDiscoveryConfig()
-    config.min_win_rate = min_win_rate
+    config.min_pnl_usd = min_pnl_usd
     config.min_volume_usd = min_volume_usd
-    config.min_trades = min_trades
     
     discovery = WalletDiscovery(config)
     
