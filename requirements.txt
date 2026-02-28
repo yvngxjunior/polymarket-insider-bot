@@ -1,6 +1,6 @@
 # Core
-py-clob-client==0.29.0
-py-order-utils==1.4.1
+py-clob-client==0.34.6
+py-order-utils==0.3.2
 web3==7.5.0
 
 # Database
@@ -32,9 +32,11 @@ pandas==2.2.3
 # Utilities
 python-dotenv==1.0.1
 python-dateutil==2.9.0.post0
+tenacity==9.0.0
 
 # Logging
 coloredlogs==15.0.1
+loguru==0.7.3
 
 # Redis (optional)
 redis==5.2.1

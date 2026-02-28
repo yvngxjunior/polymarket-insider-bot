@@ -11,7 +11,7 @@ Features:
 - Rate limiting avec exponential backoff
 """
 import asyncio
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime
 import aiohttp
 

@@ -12,6 +12,24 @@ services:
       - redis
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
+
+  api:
+    build: .
+    container_name: polymarket_api
+    restart: unless-stopped
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - bot
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
 
   postgres:
     image: postgres:16-alpine
