@@ -52,10 +52,11 @@ class Settings(BaseSettings):
     chain_id: int = 137
     signature_type: int = Field(default=0, description="Signature type (0=EOA, 1=EIP712, 2=POLY_PROXY)")
     
-    # NEW: Polymarket API Key (Builder Keys) for authenticated endpoints
-    polymarket_api_key: Optional[str] = Field(default=None, description="Polymarket Builder API Key")
-    polymarket_api_secret: Optional[str] = Field(default=None, description="Polymarket API Secret")
-    polymarket_api_passphrase: Optional[str] = Field(default=None, description="Polymarket API Passphrase")
+    # NEW: Polymarket Builder API Keys (used by py-clob-client)
+    # These match the official env var names that py-clob-client looks for
+    poly_builder_api_key: Optional[str] = Field(default=None, description="Polymarket Builder API Key")
+    poly_builder_secret: Optional[str] = Field(default=None, description="Polymarket Builder API Secret")
+    poly_builder_passphrase: Optional[str] = Field(default=None, description="Polymarket Builder API Passphrase")
 
     # ── Telegram ─────────────────────────────────────────────────────────────────
     telegram_bot_token: str

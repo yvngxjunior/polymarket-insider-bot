@@ -1,4 +1,5 @@
 import httpx
+import os
 from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -119,10 +120,6 @@ class PolymarketDataClient:
             return markets[0] if markets else None
         return markets.get("markets", [None])[0]
 
-    # FIX BUG-9: @retry retiré de get_top_traders().
-    # Le retry est désormais appliqué page par page via _fetch_leaderboard_page().
-    # La boucle principale ne porte pas de retry global pour éviter les doublons
-    # en cas de reprise depuis offset=0 sur une exception tardive.
     async def get_top_traders(
         self,
         limit: int = 150
@@ -169,38 +166,54 @@ class PolymarketDataClient:
 
     async def get_usdc_balance(self) -> float:
         """
-        Calculate USDC balance from open positions using public Data API.
+        Get USDC balance using py-clob-client with Builder API credentials.
         
-        NO AUTHENTICATION NEEDED - Uses public /positions endpoint.
+        IMPORTANT: Uses environment variables that py-clob-client auto-detects:
+        - POLY_BUILDER_API_KEY
+        - POLY_BUILDER_SECRET
+        - POLY_BUILDER_PASSPHRASE
         
-        Strategy:
-        1. Fetch all open positions for proxy_wallet
-        2. Sum up position values (size * current_price)
-        3. Return total capital in USDC
+        These env vars should be set in your .env file.
+        py-clob-client will automatically use them when creating ClobClient.
         
-        This is MORE RELIABLE than trying to authenticate with CLOB API.
+        Returns balance as float, or 0.0 if unable to fetch.
         """
+        # Set env vars from settings if configured
+        if settings.poly_builder_api_key:
+            os.environ['POLY_BUILDER_API_KEY'] = settings.poly_builder_api_key
+        if settings.poly_builder_secret:
+            os.environ['POLY_BUILDER_SECRET'] = settings.poly_builder_secret
+        if settings.poly_builder_passphrase:
+            os.environ['POLY_BUILDER_PASSPHRASE'] = settings.poly_builder_passphrase
+        
+        # Check if Builder credentials are set
+        if not os.getenv('POLY_BUILDER_API_KEY') or not os.getenv('POLY_BUILDER_SECRET'):
+            logger.warning("[PolymarketClient] Builder API credentials not configured")
+            logger.info("[PolymarketClient] Set POLY_BUILDER_API_KEY + SECRET + PASSPHRASE in .env")
+            return 0.0
+        
         try:
-            # Get positions for the proxy wallet (public endpoint)
-            positions = await self.get_wallet_positions(
-                wallet=settings.proxy_wallet,
-                limit=100
+            from py_clob_client.client import ClobClient
+            
+            # ClobClient will auto-detect POLY_BUILDER_* env vars
+            client = ClobClient(
+                host=settings.polymarket_host,
+                chain_id=settings.chain_id
             )
             
-            if not positions:
-                logger.info("[PolymarketClient] No open positions found")
-                return 0.0
+            # Get balance
+            balance_response = client.get_balance_allowance()
             
-            # Calculate total capital from positions
-            total_capital = 0.0
-            for pos in positions:
-                # Each position has: size (shares) and value (USDC)
-                position_value = float(pos.get('value', pos.get('size', 0)))
-                total_capital += position_value
+            # Extract USDC balance (in wei, divide by 1e6)
+            balance_wei = int(balance_response.get('balance', 0))
+            balance_usdc = balance_wei / 1_000_000
             
-            logger.info(f"[PolymarketClient] Calculated capital from {len(positions)} positions: ${total_capital:.2f}")
-            return total_capital
+            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance_usdc:.2f}")
+            return balance_usdc
             
+        except ImportError:
+            logger.warning("[PolymarketClient] py-clob-client not installed")
+            return 0.0
         except Exception as e:
-            logger.error(f"[PolymarketClient] Failed to calculate balance from positions: {e}")
+            logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
             return 0.0
