@@ -196,11 +196,10 @@ class TradeExecutor:
         """Execute all pending trades from database."""
         try:
             with get_db() as db:
-                # Get trades marked as DETECTED but not yet EXECUTED/SKIPPED/FAILED
+                # FIX: Use PENDING status instead of non-existent DETECTED
                 pending = db.query(CopiedTrade).filter(
-                    CopiedTrade.status == TradeStatus.DETECTED,
-                    CopiedTrade.execution_attempts < settings.retry_limit,
-                ).order_by(CopiedTrade.detected_at).limit(10).all()
+                    CopiedTrade.status == TradeStatus.PENDING
+                ).order_by(CopiedTrade.created_at).limit(10).all()
                 
                 if pending:
                     logger.debug(f"[EXECUTOR] Found {len(pending)} pending trades")
@@ -233,7 +232,7 @@ class TradeExecutor:
         # SAFETY CHECK 4: Whale quality filters
         with get_db() as db:
             whale = db.query(TrackedWallet).filter(
-                TrackedWallet.address == trade.wallet
+                TrackedWallet.address == trade.source_wallet_address
             ).first()
             
             if not whale:
@@ -241,7 +240,6 @@ class TradeExecutor:
                     f"[EXECUTOR] Trade {trade.id} | Whale not found in DB | SKIP"
                 )
                 trade.status = TradeStatus.SKIPPED
-                trade.execution_error = "Whale not in DB"
                 db.commit()
                 return
             
@@ -252,7 +250,7 @@ class TradeExecutor:
                     f"Whale score too low: {whale.score:.2f} < {settings.executor_min_whale_score} | SKIP"
                 )
                 trade.status = TradeStatus.SKIPPED
-                trade.execution_error = f"Low whale score ({whale.score:.2f})"
+                trade.skip_reason = f"Low whale score ({whale.score:.2f})"
                 db.commit()
                 return
             
@@ -264,7 +262,7 @@ class TradeExecutor:
                         f"Low conviction: {whale.conviction_score:.2f} < {settings.executor_min_conviction} | SKIP"
                     )
                     trade.status = TradeStatus.SKIPPED
-                    trade.execution_error = f"Low conviction ({whale.conviction_score:.2f})"
+                    trade.skip_reason = f"Low conviction ({whale.conviction_score:.2f})"
                     db.commit()
                     return
         
@@ -277,7 +275,7 @@ class TradeExecutor:
             )
             with get_db() as db:
                 trade.status = TradeStatus.SKIPPED
-                trade.execution_error = f"Small whale trade (${whale_size:.2f})"
+                trade.skip_reason = f"Small whale trade (${whale_size:.2f})"
                 db.commit()
             return
         
@@ -291,7 +289,7 @@ class TradeExecutor:
             )
             with get_db() as db:
                 trade.status = TradeStatus.SKIPPED
-                trade.execution_error = f"Below min order size (${our_size:.2f})"
+                trade.skip_reason = f"Below min order size (${our_size:.2f})"
                 db.commit()
             return
         
@@ -321,17 +319,12 @@ class TradeExecutor:
         logger.info(
             f"[EXECUTOR] {'🎭 DRY-RUN' if settings.executor_dry_run else '💰 EXECUTING'} | "
             f"Trade {trade.id} | "
-            f"Whale: {trade.wallet[:10]}... (score: {whale.score:.2f}) | "
+            f"Whale: {trade.source_wallet_address[:10]}... (score: {whale.score:.2f}) | "
             f"Market: {trade.market_id[:20]}... | "
             f"Side: {trade.side} | "
             f"Whale: ${whale_size:.2f} | "
             f"Us: ${our_size:.2f} ({settings.trade_multiplier*100:.1f}%)"
         )
-        
-        # Increment attempt counter
-        with get_db() as db:
-            trade.execution_attempts += 1
-            db.commit()
         
         if settings.executor_dry_run:
             # SIMULATE
@@ -353,9 +346,8 @@ class TradeExecutor:
         
         with get_db() as db:
             trade.status = TradeStatus.EXECUTED  # Mark as executed even in DRY-RUN
-            trade.our_amount_usdc = our_size
             trade.executed_at = datetime.now()
-            trade.our_tx_hash = f"DRY_RUN_{trade.id}"
+            trade.tx_hash = f"DRY_RUN_{trade.id}"
             db.commit()
         
         self.safety.record_trade()
@@ -393,8 +385,7 @@ class TradeExecutor:
                 
                 with get_db() as db:
                     trade.status = TradeStatus.EXECUTED
-                    trade.our_tx_hash = tx_hash
-                    trade.our_amount_usdc = our_size
+                    trade.tx_hash = tx_hash
                     trade.executed_at = datetime.now()
                     db.commit()
                 
@@ -416,27 +407,15 @@ class TradeExecutor:
                     )
                     with get_db() as db:
                         trade.status = TradeStatus.FAILED
-                        trade.execution_error = error_msg
+                        trade.skip_reason = error_msg
                         db.commit()
-                else:
-                    # Other errors: will retry (up to retry_limit)
-                    if trade.execution_attempts >= settings.retry_limit:
-                        logger.warning(
-                            f"[EXECUTOR] Max retries reached ({settings.retry_limit}) - marking as FAILED"
-                        )
-                        with get_db() as db:
-                            trade.status = TradeStatus.FAILED
-                            trade.execution_error = f"Max retries: {error_msg}"
-                            db.commit()
         
         except Exception as e:
             logger.error(f"[EXECUTOR] Exception executing trade {trade.id}: {e}")
-            
-            if trade.execution_attempts >= settings.retry_limit:
-                with get_db() as db:
-                    trade.status = TradeStatus.FAILED
-                    trade.execution_error = str(e)
-                    db.commit()
+            with get_db() as db:
+                trade.status = TradeStatus.FAILED
+                trade.skip_reason = str(e)
+                db.commit()
     
     def _extract_error(self, response: dict) -> str:
         """Extract error message from CLOB response."""
