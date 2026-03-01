@@ -9,7 +9,7 @@ Two modes:
 
 PHASE 1: Now uses complete /activity API to capture:
 - SELL (early exit before resolution)
-- REDEEM (claim winnings after market resolves)
+- REDEEM (claim winnings after resolution)
 - SPLIT/MERGE (advanced strategies)
 
 Docs:
@@ -18,6 +18,9 @@ Docs:
 
 FIX: Increased limits from 100/300 to 1000 to properly capture REDEEM events
      which are often buried deep in history (1% of total events).
+
+CRITICAL FIX: REDEEM events have empty 'asset' field, so matching must use
+              ONLY conditionId, not token_id.
 """
 
 import asyncio
@@ -76,6 +79,9 @@ class WhaleExitMonitor:
     - check_whale_exits: 500 limit (recent exits monitoring)
     - analyze_exit_patterns: 1000 limit (historical analysis)
     - REDEEM events are ~1% of total activity, need large sample
+    
+    CRITICAL FIX: REDEEM events have empty 'asset' field in API response.
+    Matching BUY→REDEEM must use ONLY conditionId, not token_id.
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -268,6 +274,9 @@ class WhaleExitMonitor:
         
         FIX: Increased limit to 1000 (was 300) to capture enough REDEEM events
              for accurate statistics.
+             
+        CRITICAL FIX: REDEEM events have empty 'asset' field. Matching now uses
+                      ONLY conditionId to pair BUY→REDEEM.
         """
         try:
             # PHASE 1: Get complete activity (all types)
@@ -299,24 +308,28 @@ class WhaleExitMonitor:
                     continue
 
                 event_type = event.get("type", "").upper()
+                condition_id = event.get("conditionId", "")
+                token_id = event.get("asset", "")
                 
                 if event_type == "TRADE" and event.get("side", "").upper() == "BUY":
                     buys.append({
-                        "condition_id": event.get("conditionId", ""),
-                        "token_id": event.get("asset", ""),
+                        "condition_id": condition_id,
+                        "token_id": token_id,
                         "timestamp": ts,
                     })
                 elif event_type == "TRADE" and event.get("side", "").upper() == "SELL":
                     exits.append({
-                        "condition_id": event.get("conditionId", ""),
-                        "token_id": event.get("asset", ""),
+                        "condition_id": condition_id,
+                        "token_id": token_id,
                         "timestamp": ts,
                         "type": "SELL",
                     })
                 elif event_type == "REDEEM":
+                    # CRITICAL FIX: REDEEM has empty 'asset' field
+                    # Store condition_id only for matching
                     exits.append({
-                        "condition_id": event.get("conditionId", ""),
-                        "token_id": event.get("asset", ""),
+                        "condition_id": condition_id,
+                        "token_id": "",  # Empty for REDEEM
                         "timestamp": ts,
                         "type": "REDEEM",
                     })
@@ -325,21 +338,29 @@ class WhaleExitMonitor:
                 return None
 
             # Match BUY → EXIT pairs
+            # CRITICAL FIX: For REDEEM (empty token_id), match by conditionId ONLY
             hold_times: list[float] = []
             redeem_count = 0
             sell_count = 0
 
             for exit in exits:
+                exit_is_redeem = (exit["type"] == "REDEEM")
+                
                 # Find matching BUY
                 for buy in buys:
-                    if (buy["condition_id"] == exit["condition_id"]
-                        and buy["token_id"] == exit["token_id"]
-                        and buy["timestamp"] < exit["timestamp"]):
-                        
+                    # Match logic:
+                    # - Always match by condition_id
+                    # - For SELL: also match token_id
+                    # - For REDEEM: ignore token_id (it's empty in API)
+                    condition_match = (buy["condition_id"] == exit["condition_id"])
+                    token_match = (buy["token_id"] == exit["token_id"]) if not exit_is_redeem else True
+                    time_match = (buy["timestamp"] < exit["timestamp"])
+                    
+                    if condition_match and token_match and time_match:
                         hold_hours = (exit["timestamp"] - buy["timestamp"]).total_seconds() / 3600
                         hold_times.append(hold_hours)
                         
-                        if exit["type"] == "REDEEM":
+                        if exit_is_redeem:
                             redeem_count += 1
                         else:
                             sell_count += 1
