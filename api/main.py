@@ -15,9 +15,6 @@ from bot.utils.logger import logger
 from bot.trading.trailing_stop import get_trailing_stop_manager
 from bot.scanner.wallet_discovery import discover_wallets
 
-# NEW: Import Polymarket Client for balance fetching
-from bot.polymarket.client import PolymarketClient
-
 settings = get_settings()
 
 app = FastAPI(
@@ -89,46 +86,30 @@ async def health_check():
 
 @app.get("/api/portfolio")
 async def get_portfolio() -> Dict[str, Any]:
-    """Get current portfolio summary with REAL Polymarket balance"""
-    try:
-        # FIX: Fetch REAL balance from Polymarket CLOB API
-        client = PolymarketClient()
-        balance_response = await client.get_balance()
-        
-        # Extract USDC balance
-        total_capital = 0.0
-        if balance_response and "balances" in balance_response:
-            for token in balance_response["balances"]:
-                if token.get("symbol") == "USDC":
-                    total_capital = float(token.get("balance", 0))
-                    break
-        
-        logger.info(f"[API] Fetched real Polymarket balance: ${total_capital}")
-        
-    except Exception as e:
-        logger.warning(f"[API] Failed to fetch Polymarket balance: {e}")
-        # Fallback to DB snapshot if API fails
-        with get_db() as db:
-            latest_snapshot = (
-                db.query(PortfolioSnapshot)
-                .order_by(PortfolioSnapshot.updated_at.desc())
-                .first()
-            )
-            total_capital = (
-                float(latest_snapshot.total_capital)
-                if latest_snapshot
-                else 0.0  # FIX: Changed from 500.0 to 0.0
-            )
-    
-    # Calculate total PnL from closed trades
+    """Get current portfolio summary"""
     with get_db() as db:
+        # Get total capital from latest snapshot (or 0 if none exists)
+        latest_snapshot = (
+            db.query(PortfolioSnapshot)
+            .order_by(PortfolioSnapshot.updated_at.desc())
+            .first()
+        )
+        
+        # FIX: Default to 0.0 instead of 500.0 if no snapshot exists
+        total_capital = (
+            float(latest_snapshot.total_capital)
+            if latest_snapshot
+            else 0.0
+        )
+        
+        # Calculate total PnL from closed trades
         closed_trades = db.query(CopiedTrade).filter(
             CopiedTrade.pnl_usdc.isnot(None)
         ).all()
         
         total_pnl = sum(float(t.pnl_usdc) for t in closed_trades if t.pnl_usdc)
         initial_capital = total_capital - total_pnl if total_capital > 0 else 0.0
-    
+        
     return {
         "total_capital": round(total_capital, 2),
         "initial_capital": round(initial_capital, 2),
