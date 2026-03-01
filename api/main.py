@@ -91,7 +91,7 @@ async def health_check():
 async def get_portfolio() -> Dict[str, Any]:
     """Get current portfolio summary with REAL Polymarket balance"""
     try:
-        # NEW: Fetch REAL balance from Polymarket CLOB API
+        # NEW: Fetch REAL balance from Polymarket Data API
         poly_client = PolymarketDataClient()
         total_capital = await poly_client.get_usdc_balance()
         await poly_client.close()
@@ -176,7 +176,6 @@ async def get_positions(status: Optional[str] = None) -> Dict[str, Any]:
 async def get_wallets() -> Dict[str, Any]:
     """Get tracked wallets"""
     with get_db() as db:
-        # FIX: Get ALL active wallets, not just auto-discovered ones
         active_wallets = (
             db.query(TrackedWallet)
             .filter(TrackedWallet.is_active == True)  # noqa: E712
@@ -184,7 +183,6 @@ async def get_wallets() -> Dict[str, Any]:
             .all()
         )
         
-        # FIX: Materialize data INSIDE the session before returning
         wallet_list = [
             {
                 "address": w.address,
@@ -215,9 +213,6 @@ async def add_to_whitelist(wallet: WalletInput):
         raise HTTPException(status_code=400, detail="Wallet already whitelisted")
         
     current_whitelist.add(wallet.address.lower())
-    new_whitelist_str = ",".join(current_whitelist)
-    
-    # Update .env (in production, use proper config management)
     logger.info(f"[API] Added {wallet.address} to whitelist")
     
     return {
@@ -279,7 +274,6 @@ async def run_backtest(request: BacktestRequest) -> Dict[str, Any]:
 @app.post("/api/bot/control")
 async def control_bot(request: BotControlRequest):
     """Control bot (start/stop/status)"""
-    # TODO: Implement actual bot control (requires refactoring main.py)
     logger.info(f"[API] Bot control: {request.action}")
     
     if request.action == "status":
@@ -300,7 +294,6 @@ async def get_trailing_sl_status() -> Dict[str, Any]:
     """Get Trailing SL status and tracked positions"""
     manager = get_trailing_stop_manager()
     
-    # Get all tracked positions
     tracked_positions = []
     for pos_id, data in manager._peaks.items():
         stats = manager.get_position_stats(pos_id)
@@ -322,6 +315,17 @@ async def get_trailing_sl_status() -> Dict[str, Any]:
             "trail_distance_pct": manager.config.trail_distance_pct * 100,
             "min_locked_profit_pct": manager.config.min_locked_profit_pct * 100,
         },
+    }
+
+@app.get("/api/features/trailing-sl/config")
+async def get_trailing_sl_config() -> Dict[str, Any]:
+    """Get current Trailing SL configuration"""
+    manager = get_trailing_stop_manager()
+    
+    return {
+        "activation_gain_pct": manager.config.activation_gain_pct,
+        "trail_distance_pct": manager.config.trail_distance_pct,
+        "min_locked_profit_pct": manager.config.min_locked_profit_pct,
     }
 
 @app.get("/api/features/trailing-sl/position/{position_id}")
@@ -380,7 +384,6 @@ async def run_wallet_discovery(request: DiscoveryRequest) -> Dict[str, Any]:
 async def get_discovery_stats() -> Dict[str, Any]:
     """Get wallet discovery statistics"""
     with get_db() as db:
-        # Count all wallets with high scores (likely auto-discovered)
         high_score_wallets = (
             db.query(TrackedWallet)
             .filter(
@@ -391,7 +394,6 @@ async def get_discovery_stats() -> Dict[str, Any]:
             .all()
         )
         
-        # Materialize data inside session
         wallet_data = [
             {
                 "address": w.address,
@@ -480,7 +482,6 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            # Keep connection alive + stream latest trades
             with get_db() as db:
                 latest_trades = (
                     db.query(CopiedTrade)
