@@ -21,14 +21,11 @@ class PolymarketDataClient:
     """
 
     def __init__(self):
-        # Proxy config for geo-restricted regions (France, etc.)
-        proxy_config = None
-        if settings.http_proxy:
-            proxy_config = {
-                "http://": settings.http_proxy,
-                "https://": settings.http_proxy,
-            }
-            logger.info(f"[PolymarketClient] Using HTTP proxy: {settings.http_proxy}")
+        # httpx uses 'proxy' (singular), not 'proxies'
+        proxy_url = settings.http_proxy if settings.http_proxy else None
+        
+        if proxy_url:
+            logger.info(f"[PolymarketClient] Using HTTP proxy: {proxy_url}")
         
         self._data_client = httpx.AsyncClient(
             base_url=settings.polymarket_data_host,
@@ -38,7 +35,7 @@ class PolymarketDataClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             },
-            proxies=proxy_config,
+            proxy=proxy_url,  # Correct: 'proxy' not 'proxies'
         )
         self._gamma_client = httpx.AsyncClient(
             base_url=settings.polymarket_gamma_host,
@@ -48,7 +45,7 @@ class PolymarketDataClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             },
-            proxies=proxy_config,
+            proxy=proxy_url,
         )
 
     async def close(self):
@@ -72,14 +69,13 @@ class PolymarketDataClient:
                 "user": wallet,
                 "limit": limit,
                 "offset": offset,
-                "type": "TRADE",  # Filter only trades
+                "type": "TRADE",
                 "sortBy": "TIMESTAMP",
                 "sortDirection": "DESC"
             }
         )
         resp.raise_for_status()
         data = resp.json()
-        # Response is always an array
         return data if isinstance(data, list) else []
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
@@ -103,16 +99,14 @@ class PolymarketDataClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        # Response is always an array
         trades = data if isinstance(data, list) else []
         
         result = []
         for t in trades:
-            # Map official API response fields
             result.append({
                 "transactionHash": t.get("transactionHash", ""),
                 "maker":           t.get("proxyWallet", ""),
-                "usdcSize":        float(t.get("size", 0)),  # Size in tokens (not USD)
+                "usdcSize":        float(t.get("size", 0)),
                 "conditionId":     t.get("conditionId", ""),
                 "asset":           t.get("asset", ""),
                 "side":            t.get("side", "BUY"),
@@ -137,14 +131,13 @@ class PolymarketDataClient:
             params={
                 "user": wallet,
                 "limit": limit,
-                "sizeThreshold": 1.0,  # Min position size
-                "sortBy": "CURRENT",    # Sort by current value
+                "sizeThreshold": 1.0,
+                "sortBy": "CURRENT",
                 "sortDirection": "DESC"
             }
         )
         resp.raise_for_status()
         data = resp.json()
-        # Response is always an array
         return data if isinstance(data, list) else []
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
@@ -211,7 +204,6 @@ class PolymarketDataClient:
         Returns total USD value of all open positions.
         """
         try:
-            # Use official /value endpoint (no auth required)
             resp = await self._data_client.get(
                 "/value",
                 params={"user": settings.proxy_wallet}
@@ -230,5 +222,4 @@ class PolymarketDataClient:
             
         except Exception as e:
             logger.error(f"[PolymarketClient] Failed to fetch value: {e}")
-            logger.info("[PolymarketClient] If in France/restricted region, configure HTTP_PROXY in .env")
             return 0.0
