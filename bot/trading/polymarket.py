@@ -167,22 +167,21 @@ class PolymarketDataClient:
         data = resp.json()
         return data if isinstance(data, list) else data.get("leaderboard", data.get("data", []))
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-    async def get_usdc_balance(self) -> float:
+    def get_usdc_balance(self) -> float:
         """
         NEW: Get USDC balance using py-clob-client.
         Requires API credentials configured in .env:
         - PRIVATE_KEY
-        - PROXY_WALLET
+        - PROXY_WALLET (if using Magic/Browser wallet)
         - POLYMARKET_HOST
         - CHAIN_ID
         - SIGNATURE_TYPE
+        
         Returns balance as float, or 0.0 if unable to fetch.
         """
         try:
-            # Import py-clob-client dynamically to avoid breaking if not installed
+            # Import py-clob-client dynamically
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import BalanceAllowanceParams
             
             # Initialize CLOB client with credentials from settings
             client = ClobClient(
@@ -193,10 +192,13 @@ class PolymarketDataClient:
                 funder=settings.proxy_wallet,
             )
             
-            # Get balance for COLLATERAL (USDC)
-            # FIX: Use BalanceAllowanceParams with asset_type="COLLATERAL"
-            params = BalanceAllowanceParams(asset_type="COLLATERAL")
-            balance_response = client.get_balance_allowance(params)
+            # CRITICAL: Must create/derive API credentials first
+            logger.info("[PolymarketClient] Creating API credentials...")
+            api_creds = client.create_or_derive_api_creds()
+            client.set_api_creds(api_creds)
+            
+            # Now we can call authenticated endpoints
+            balance_response = client.get_balance_allowance()
             
             balance = float(balance_response.get('balance', 0))
             logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
