@@ -50,6 +50,8 @@ class WhaleTracker:
       
     FIX WHALE-4 -- Auto-add whale wallets to tracking
       Les wallets détectés sont automatiquement ajoutés à la DB s'ils n'existent pas.
+      
+    FIX WHALE-5 -- Return added_count to trigger immediate refresh
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -60,6 +62,9 @@ class WhaleTracker:
         self._seen_set: set[str] = set()
         # Cache des mots-cles (immutables pour la duree de vie du process)
         self._noise_keywords: list[str] = settings.get_whale_keywords_blacklist()
+        # NEW: Track last auto-add count
+        self.last_added_count = 0
+        
         if self._noise_keywords:
             logger.info(
                 f"[WHALE] Keyword filter active: {len(self._noise_keywords)} keywords"
@@ -99,6 +104,7 @@ class WhaleTracker:
         return any(kw in t for kw in self._noise_keywords)
 
     async def scan(self) -> list[dict]:
+        """Returns (events, added_count) tuple."""
         large_trades = await self.client.get_recent_large_trades(
             min_amount=settings.whale_threshold
         )
@@ -171,9 +177,9 @@ class WhaleTracker:
             })
 
         # FIX WHALE-4: Auto-add whale wallets to DB if not tracked
+        added_count = 0
         if whale_wallets_to_add:
             try:
-                added_count = 0
                 with get_db() as db:
                     for wallet_addr, amount in whale_wallets_to_add.items():
                         wallet_lower = wallet_addr.lower()
@@ -211,5 +217,7 @@ class WhaleTracker:
                     
             except Exception as e:
                 logger.warning(f"[WHALE] DB auto-add failed: {e}")
-
+        
+        # FIX WHALE-5: Store count for external trigger
+        self.last_added_count = added_count
         return new_events
