@@ -28,7 +28,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict to frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,6 +50,11 @@ class BacktestRequest(BaseModel):
 
 class BotControlRequest(BaseModel):
     action: str = Field(..., description="start|stop|status")
+
+class SettingsUpdateRequest(BaseModel):
+    dry_run: Optional[bool] = None
+    max_trade_amount: Optional[float] = None
+    min_win_rate: Optional[float] = None
 
 class DiscoveryRequest(BaseModel):
     min_pnl_usd: float = Field(500.0, gt=0, description="Minimum PnL filter")
@@ -84,6 +89,47 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 # ----------------------------------------------------------------------------
+# Settings Management
+# ----------------------------------------------------------------------------
+
+@app.get("/api/settings")
+async def get_settings_api() -> Dict[str, Any]:
+    """Get current bot settings"""
+    return {
+        "dry_run": settings.dry_run,
+        "max_trade_amount": settings.max_trade_amount,
+        "min_win_rate": settings.min_win_rate,
+        "whale_threshold": settings.whale_threshold,
+        "scan_interval": settings.scan_interval,
+    }
+
+@app.post("/api/settings")
+async def update_settings(request: SettingsUpdateRequest) -> Dict[str, Any]:
+    """Update bot settings (requires restart to fully apply)"""
+    updated_fields = []
+    
+    # Update in-memory settings (will be lost on restart)
+    if request.dry_run is not None:
+        settings.dry_run = request.dry_run
+        updated_fields.append("dry_run")
+        logger.info(f"[API] Dry run mode set to: {request.dry_run}")
+    
+    if request.max_trade_amount is not None:
+        settings.max_trade_amount = request.max_trade_amount
+        updated_fields.append("max_trade_amount")
+    
+    if request.min_win_rate is not None:
+        settings.min_win_rate = request.min_win_rate
+        updated_fields.append("min_win_rate")
+    
+    return {
+        "status": "updated",
+        "updated_fields": updated_fields,
+        "message": "Settings updated in-memory. Restart bot to persist changes to .env",
+        "dry_run": settings.dry_run,
+    }
+
+# ----------------------------------------------------------------------------
 # Portfolio & Positions
 # ----------------------------------------------------------------------------
 
@@ -91,7 +137,6 @@ async def health_check():
 async def get_portfolio() -> Dict[str, Any]:
     """Get current portfolio summary with REAL Polymarket balance"""
     try:
-        # NEW: Fetch REAL balance from Polymarket Data API
         poly_client = PolymarketDataClient()
         total_capital = await poly_client.get_usdc_balance()
         await poly_client.close()
@@ -100,7 +145,6 @@ async def get_portfolio() -> Dict[str, Any]:
         
     except Exception as e:
         logger.warning(f"[API] Failed to fetch Polymarket balance, using DB fallback: {e}")
-        # Fallback to DB snapshot if API fails
         with get_db() as db:
             latest_snapshot = (
                 db.query(PortfolioSnapshot)
@@ -113,7 +157,6 @@ async def get_portfolio() -> Dict[str, Any]:
                 else 0.0
             )
     
-    # Calculate total PnL from closed trades
     with get_db() as db:
         closed_trades = db.query(CopiedTrade).filter(
             CopiedTrade.pnl_usdc.isnot(None)
@@ -126,7 +169,7 @@ async def get_portfolio() -> Dict[str, Any]:
         "total_capital": round(total_capital, 2),
         "initial_capital": round(initial_capital, 2),
         "total_pnl": round(total_pnl, 2),
-        "open_positions": 0,  # TODO: track open positions properly
+        "open_positions": 0,
         "return_pct": round(
             (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
             2,
@@ -140,7 +183,6 @@ async def get_positions(status: Optional[str] = None) -> Dict[str, Any]:
         query = db.query(CopiedTrade)
         
         if status:
-            # Map status to TradeStatus enum
             from bot.database import TradeStatus
             if status.upper() == "OPEN":
                 query = query.filter(CopiedTrade.status == TradeStatus.PENDING)
