@@ -7,6 +7,11 @@ Two modes:
 1. Passive: Analyze exit patterns for scoring
 2. Active: Alert when whale exits a market we're holding
 
+PHASE 1: Now uses complete /activity API to capture:
+- SELL (early exit before resolution)
+- REDEEM (claim winnings after market resolves)
+- SPLIT/MERGE (advanced strategies)
+
 Docs:
 - /activity REDEEM schema: https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
 - Exit strategies: https://news.stand.trade/p/redeeming-vs-splitting-vs-merging
@@ -55,6 +60,9 @@ class WhaleExitStats:
 class WhaleExitMonitor:
     """Monitors whale exit events (REDEEM/SELL) for signals.
     
+    PHASE 1: Enhanced with complete /activity API support.
+    Now properly captures REDEEM events (not just SELL).
+    
     Features:
     - Track REDEEM (held to resolution) vs SELL (early exit)
     - Calculate hold time and conviction metrics
@@ -73,6 +81,9 @@ class WhaleExitMonitor:
         since_hours: int = 6
     ) -> list[WhaleExitEvent]:
         """Check for recent exits from tracked whales.
+        
+        PHASE 1: Now uses get_wallet_activity() instead of get_wallet_trades()
+        to capture REDEEM events properly.
         
         Args:
             whale_addresses: List of whale wallet addresses to monitor
@@ -111,31 +122,50 @@ class WhaleExitMonitor:
         wallet: str,
         cutoff: datetime
     ) -> list[WhaleExitEvent]:
-        """Check single wallet for recent exits."""
+        """Check single wallet for recent exits.
+        
+        PHASE 1: Uses get_wallet_activity() to capture ALL activity types.
+        Filters for SELL (type=TRADE + side=SELL) and REDEEM (type=REDEEM).
+        """
         try:
-            # Get recent activity
-            activity = await self.client.get_wallet_trades(wallet, limit=50)
+            # PHASE 1: Use complete /activity API (no type filter)
+            activity = await self.client.get_wallet_activity(
+                wallet=wallet,
+                limit=100,
+                event_type=None,  # Get all types
+            )
             
             exits: list[WhaleExitEvent] = []
-            for trade in activity:
-                trade_type = trade.get("type", "").upper()
-                if trade_type not in ("REDEEM", "SELL"):
+            for event in activity:
+                event_type = event.get("type", "").upper()
+                
+                # PHASE 1: Capture both SELL (from TRADE events) and REDEEM
+                is_sell = (event_type == "TRADE" and event.get("side", "").upper() == "SELL")
+                is_redeem = (event_type == "REDEEM")
+                
+                if not (is_sell or is_redeem):
                     continue
 
                 # Parse timestamp
-                ts_str = trade.get("timestamp", "")
-                if not ts_str:
+                ts_raw = event.get("timestamp")
+                if not ts_raw:
                     continue
                     
                 try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    # Handle both ISO string and unix timestamp
+                    if isinstance(ts_raw, (int, float)):
+                        ts = datetime.fromtimestamp(ts_raw)
+                    else:
+                        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    
                     if ts < cutoff:
                         continue
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"[WHALE_EXIT] Timestamp parse error: {e}")
                     continue
 
                 # Check if we already processed this exit
-                condition_id = trade.get("conditionId", "")
+                condition_id = event.get("conditionId", "")
                 if not condition_id:
                     continue
                     
@@ -145,23 +175,28 @@ class WhaleExitMonitor:
                     continue
 
                 # Build exit event
-                size = float(trade.get("size", 0))
-                price = float(trade.get("price", 0))
-                usdc_size = float(trade.get("usdcSize", 0))
+                size = float(event.get("size", 0))
+                price = float(event.get("price", 0))
+                usdc_size = float(event.get("usdcSize", 0))
                 
                 # Estimate USDC amount
                 if usdc_size == 0 and size > 0:
-                    usdc_size = size * price
+                    # For REDEEM, price is 1.0 or 0.0 depending on outcome
+                    if is_redeem:
+                        # Assume winning outcome for estimation
+                        usdc_size = size  # 1 token = 1 USDC on winning side
+                    elif price > 0:
+                        usdc_size = size * price
 
                 exit_event = WhaleExitEvent(
                     wallet=wallet,
                     condition_id=condition_id,
-                    token_id=trade.get("asset", ""),
-                    exit_type=trade_type,
-                    price=price,
+                    token_id=event.get("asset", ""),
+                    exit_type="REDEEM" if is_redeem else "SELL",
+                    price=price if not is_redeem else (1.0 if size > 0 else 0.0),
                     amount_usdc=usdc_size,
                     timestamp=ts,
-                    title=trade.get("title", "")[:60],
+                    title=event.get("title", "")[:60],
                 )
                 exits.append(exit_event)
 
@@ -210,6 +245,8 @@ class WhaleExitMonitor:
     ) -> Optional[WhaleExitStats]:
         """Analyze exit behavior for a wallet.
         
+        PHASE 1: Now properly distinguishes REDEEM from SELL.
+        
         Calculates:
         - Redeem rate (held to resolution)
         - Sell rate (early exit before resolution)
@@ -217,39 +254,54 @@ class WhaleExitMonitor:
         - Conviction score (higher = better)
         """
         try:
-            # Get extended history
-            activity = await self.client.get_wallet_trades(wallet, limit=300)
+            # PHASE 1: Get complete activity (all types)
+            activity = await self.client.get_wallet_activity(
+                wallet=wallet,
+                limit=300,
+            )
             
             cutoff = datetime.now() - timedelta(days=lookback_days)
             
             buys = []
             exits = []
             
-            for trade in activity:
-                ts_str = trade.get("timestamp", "")
-                if not ts_str:
+            for event in activity:
+                ts_raw = event.get("timestamp")
+                if not ts_raw:
                     continue
                     
                 try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if isinstance(ts_raw, (int, float)):
+                        ts = datetime.fromtimestamp(ts_raw)
+                    else:
+                        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    
                     if ts < cutoff:
                         continue
                 except Exception:
                     continue
 
-                trade_type = trade.get("type", "").upper()
-                if trade_type == "BUY":
+                event_type = event.get("type", "").upper()
+                
+                if event_type == "TRADE" and event.get("side", "").upper() == "BUY":
                     buys.append({
-                        "condition_id": trade.get("conditionId", ""),
-                        "token_id": trade.get("asset", ""),
+                        "condition_id": event.get("conditionId", ""),
+                        "token_id": event.get("asset", ""),
                         "timestamp": ts,
                     })
-                elif trade_type in ("REDEEM", "SELL"):
+                elif event_type == "TRADE" and event.get("side", "").upper() == "SELL":
                     exits.append({
-                        "condition_id": trade.get("conditionId", ""),
-                        "token_id": trade.get("asset", ""),
+                        "condition_id": event.get("conditionId", ""),
+                        "token_id": event.get("asset", ""),
                         "timestamp": ts,
-                        "type": trade_type,
+                        "type": "SELL",
+                    })
+                elif event_type == "REDEEM":
+                    exits.append({
+                        "condition_id": event.get("conditionId", ""),
+                        "token_id": event.get("asset", ""),
+                        "timestamp": ts,
+                        "type": "REDEEM",
                     })
 
             if not exits:
@@ -330,7 +382,8 @@ class WhaleExitMonitor:
                         logger.info(
                             f"[WHALE_EXIT] {whale.address[:10]}... | "
                             f"Conviction: {stats.conviction_score:.2f} | "
-                            f"Redeem: {stats.redeem_count}/{stats.total_exits} | "
+                            f"Redeem: {stats.redeem_count}/{stats.total_exits} ({stats.redeem_count/stats.total_exits:.0%}) | "
+                            f"Sell: {stats.sell_count}/{stats.total_exits} ({stats.early_exit_rate:.0%}) | "
                             f"Hold: {stats.avg_hold_hours:.1f}h"
                         )
 
