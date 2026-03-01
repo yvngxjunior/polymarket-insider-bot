@@ -169,66 +169,51 @@ class PolymarketDataClient:
 
     async def get_usdc_balance(self) -> float:
         """
-        Get USDC balance using Polymarket Builder API Key.
+        Get USDC balance using py-clob-client with API Key authentication.
         
-        Uses API Key + Secret + Passphrase from .env to authenticate.
-        Falls back to 0.0 if credentials are not configured.
+        SIMPLIFIED: Use ClobClient with apiCreds from API Key/Secret/Passphrase.
+        This is the official way to authenticate with Builder API Keys.
         
-        Returns balance as float.
+        Returns balance as float, or 0.0 if unable to fetch.
         """
         # Check if API credentials are configured
         if not settings.polymarket_api_key or not settings.polymarket_api_secret:
-            logger.warning("[PolymarketClient] API Key/Secret not configured - returning 0.0")
-            logger.info("[PolymarketClient] Add POLYMARKET_API_KEY and POLYMARKET_API_SECRET to .env")
+            logger.warning("[PolymarketClient] API Key/Secret not configured")
+            logger.info("[PolymarketClient] Add POLYMARKET_API_KEY + SECRET + PASSPHRASE to .env")
             return 0.0
         
         try:
-            # Use httpx to call the balance endpoint with API auth
-            import hmac
-            import hashlib
-            import time
-            import base64
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
             
-            timestamp = str(int(time.time()))
-            method = "GET"
-            path = "/balances"
+            # Create ApiCreds from settings
+            api_creds = ApiCreds(
+                api_key=settings.polymarket_api_key,
+                api_secret=settings.polymarket_api_secret,
+                api_passphrase=settings.polymarket_api_passphrase or ""
+            )
             
-            # Create signature (HMAC-SHA256)
-            message = timestamp + method + path
-            signature = hmac.new(
-                settings.polymarket_api_secret.encode('utf-8'),
-                message.encode('utf-8'),
-                hashlib.sha256
-            ).digest()
-            signature_b64 = base64.b64encode(signature).decode('utf-8')
+            # Initialize client WITHOUT private key (use API creds only)
+            client = ClobClient(
+                host=settings.polymarket_host,
+                chain_id=settings.chain_id,
+                key="",  # Empty key when using API creds
+                creds=api_creds  # Use API credentials
+            )
             
-            headers = {
-                "POLY-API-KEY": settings.polymarket_api_key,
-                "POLY-SIGNATURE": signature_b64,
-                "POLY-TIMESTAMP": timestamp,
-                "POLY-PASSPHRASE": settings.polymarket_api_passphrase or "",
-            }
+            # Get balance for COLLATERAL (USDC)
+            balance_response = client.get_balance_allowance()
             
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{settings.polymarket_host}{path}",
-                    headers=headers
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            # Extract balance (in wei, divide by 1e6 for USDC)
+            balance_wei = int(balance_response.get('balance', 0))
+            balance_usdc = balance_wei / 1_000_000  # USDC has 6 decimals
             
-            # Extract USDC balance
-            balance = 0.0
-            if isinstance(data, dict):
-                # Check for USDC balance (asset_id or symbol)
-                for asset in data.get('balances', []):
-                    if asset.get('symbol') == 'USDC' or asset.get('asset') == 'USDC':
-                        balance = float(asset.get('balance', 0))
-                        break
+            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance_usdc}")
+            return balance_usdc
             
-            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
-            return balance
-            
+        except ImportError:
+            logger.warning("[PolymarketClient] py-clob-client not installed")
+            return 0.0
         except Exception as e:
             logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
             return 0.0
