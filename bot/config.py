@@ -44,11 +44,13 @@ class Settings(BaseSettings):
 
     # ── Polymarket ─────────────────────────────────────────────────────────────────
     polymarket_host: str = "https://clob.polymarket.com"
+    polymarket_clob_host: str = Field(default="https://clob.polymarket.com", description="Alias for polymarket_host")
     polymarket_gamma_host: str = "https://gamma-api.polymarket.com"
     polymarket_data_host: str = "https://data-api.polymarket.com"
     private_key: str
     proxy_wallet: str
     chain_id: int = 137
+    signature_type: int = Field(default=0, description="Signature type (0=EOA, 1=EIP712, 2=POLY_PROXY)")
 
     # ── Telegram ─────────────────────────────────────────────────────────────────
     telegram_bot_token: str
