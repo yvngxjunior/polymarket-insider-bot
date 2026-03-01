@@ -25,15 +25,26 @@ class PolymarketDataClient:
     """
 
     def __init__(self):
+        # Proxy config for geo-restricted regions (France, etc.)
+        proxy_config = None
+        if settings.http_proxy:
+            proxy_config = {
+                "http://": settings.http_proxy,
+                "https://": settings.http_proxy,
+            }
+            logger.info(f"[PolymarketClient] Using HTTP proxy: {settings.http_proxy}")
+        
         self._data_client = httpx.AsyncClient(
             base_url=settings.polymarket_data_host,
             timeout=15.0,
             headers={"User-Agent": "PolyInsiderBot/1.0"},
+            proxies=proxy_config,
         )
         self._gamma_client = httpx.AsyncClient(
             base_url=settings.polymarket_gamma_host,
             timeout=15.0,
             headers={"User-Agent": "PolyInsiderBot/1.0"},
+            proxies=proxy_config,
         )
 
     async def close(self):
@@ -173,8 +184,7 @@ class PolymarketDataClient:
         - POLY_BUILDER_SECRET
         - POLY_BUILDER_PASSPHRASE
         
-        These env vars should be set in your .env file.
-        py-clob-client will automatically use them when creating ClobClient.
+        For geo-restricted regions (France, etc.), set HTTP_PROXY in .env.
         
         Returns balance as float, or 0.0 if unable to fetch.
         """
@@ -186,6 +196,11 @@ class PolymarketDataClient:
         if settings.poly_builder_passphrase:
             os.environ['POLY_BUILDER_PASSPHRASE'] = settings.poly_builder_passphrase
         
+        # Set proxy for py-clob-client if configured
+        if settings.http_proxy:
+            os.environ['HTTP_PROXY'] = settings.http_proxy
+            os.environ['HTTPS_PROXY'] = settings.http_proxy
+        
         # Check if Builder credentials are set
         if not os.getenv('POLY_BUILDER_API_KEY') or not os.getenv('POLY_BUILDER_SECRET'):
             logger.warning("[PolymarketClient] Builder API credentials not configured")
@@ -195,7 +210,7 @@ class PolymarketDataClient:
         try:
             from py_clob_client.client import ClobClient
             
-            # ClobClient will auto-detect POLY_BUILDER_* env vars
+            # ClobClient will auto-detect POLY_BUILDER_* env vars and HTTP_PROXY
             client = ClobClient(
                 host=settings.polymarket_host,
                 chain_id=settings.chain_id
@@ -216,4 +231,5 @@ class PolymarketDataClient:
             return 0.0
         except Exception as e:
             logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
+            logger.info("[PolymarketClient] If in France/restricted region, configure HTTP_PROXY in .env")
             return 0.0
