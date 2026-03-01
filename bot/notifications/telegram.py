@@ -15,6 +15,7 @@ from bot.utils.logger import logger
 if TYPE_CHECKING:
     from bot.scanner.arbitrage import ArbitrageOpportunity
     from bot.ai.llm_agent import LLMSignal
+    from bot.scanner.hot_market_detector import HotMarketSignal  # PHASE 3
 
 settings = get_settings()
 
@@ -29,6 +30,7 @@ class TelegramNotifier:
       - notify_convergence()   → plusieurs insiders sur même marché
       - notify_arbitrage()     → opportunité arb Poly↔Kalshi
       - notify_llm_signal()    → recommandation GPT-4o-mini
+      - notify_hot_market()    → marché avec activité explosive [PHASE 3]
       - notify_startup()       → démarrage du bot
 
     FIX TELEGRAM-1: retry 3x sur TelegramError puis swallow (ne raise jamais)
@@ -229,13 +231,63 @@ class TelegramNotifier:
         await self.send(msg)
 
     # ------------------------------------------------------------------
+    # PHASE 3: Hot Market — explosive volume/whale clustering
+    # ------------------------------------------------------------------
+    async def notify_hot_market(self, signal: HotMarketSignal) -> None:
+        """Alerte pour marché avec activité explosive.
+        
+        PHASE 3: Détecte les marchés viraux avant qu'ils explosent.
+        """
+        strength_emoji = {
+            "EXTREME": "🔥🔥🔥",
+            "HIGH": "🔥🔥",
+            "MEDIUM": "🔥",
+        }.get(signal.strength, "🔥")
+        
+        signal_emoji = {
+            "WHALE_CLUSTER": "🐋",
+            "VOLUME_SPIKE": "📈",
+            "MOMENTUM": "⚡",
+        }.get(signal.signal_type, "🚨")
+        
+        # Format whale list
+        whale_list = ""
+        if signal.whale_addresses:
+            whale_list = "\n💼 Whales active:\n" + "\n".join(
+                f"  • <code>{w[:10]}...</code>"
+                for w in signal.whale_addresses[:3]
+            )
+            if len(signal.whale_addresses) > 3:
+                whale_list += f"\n  <i>...and {len(signal.whale_addresses) - 3} more</i>"
+        
+        msg = (
+            f"{strength_emoji} <b>HOT MARKET DETECTED</b> {signal_emoji}\n"
+            f"────────────────────\n"
+            f"📊 Market: <i>{signal.title[:70]}</i>\n"
+            f"🎯 Type: <b>{signal.signal_type}</b>\n"
+            f"⚡ Strength: <b>{signal.strength}</b>\n"
+            f"🎲 Confidence: <b>{signal.confidence:.0%}</b>\n\n"
+            f"📈 Recent Volume: <b>${signal.recent_volume_usdc:,.0f}</b>\n"
+            f"📊 Volume Spike: <b>{signal.volume_multiplier:.1f}x</b> normal\n"
+            f"🐋 Whales Active: <b>{signal.whale_count}</b>\n"
+            f"👥 Total Traders: <b>{signal.total_traders}</b>\n"
+            f"💰 Avg Whale Trade: <b>${signal.avg_whale_amount:,.0f}</b>\n"
+            f"🎯 Current Price: <b>{signal.current_yes_price:.3f}</b>\n"
+            + (f"⚡ Price Change (1h): <b>{signal.price_change_1h:+.1f}%</b>\n"
+               if abs(signal.price_change_1h) > 1 else "")
+            + whale_list
+            + f"\n\n💡 <i>Multiple whales entering this market NOW. Consider fast-track copy.</i>"
+        )
+        await self.send(msg)
+
+    # ------------------------------------------------------------------
     # Démarrage du bot
     # ------------------------------------------------------------------
     async def notify_startup(self, dry_run: bool) -> None:
         # FIX P2: version banner v2.4 → v3.1 (sync avec main.py)
         mode = "🟡 DRY RUN" if dry_run else "🟢 LIVE"
         msg = (
-            f"🤖 <b>PolyInsider Bot v3.1 Started</b>\n"
+            f"🤖 <b>PolyInsider Bot v3.3 (PHASE 3) Started</b>\n"
             f"────────────────────\n"
             f"Mode: <b>{mode}</b>\n"
             f"Scan interval: <b>{settings.scan_interval}s</b>\n"
@@ -244,5 +296,6 @@ class TelegramNotifier:
             f"Whale threshold: <b>${settings.whale_threshold:,.0f}</b>\n"
             f"LLM: <b>{'enabled 🧠' if settings.llm_enabled else 'disabled'}</b>\n"
             f"Arb: <b>{'enabled ⚡' if settings.arb_enabled else 'disabled'}</b>\n"
+            f"🔥 Hot Market Detection: <b>ENABLED</b>\n"
         )
         await self.send(msg)
