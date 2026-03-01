@@ -176,26 +176,27 @@ class PolymarketDataClient:
         - PROXY_WALLET
         - POLYMARKET_HOST
         - CHAIN_ID
+        - SIGNATURE_TYPE
         Returns balance as float, or 0.0 if unable to fetch.
         """
         try:
             # Import py-clob-client dynamically to avoid breaking if not installed
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import AssetType
+            from py_clob_client.clob_types import BalanceAllowanceParams
             
             # Initialize CLOB client with credentials from settings
             client = ClobClient(
                 host=settings.polymarket_host,
                 key=settings.private_key,
                 chain_id=settings.chain_id,
-                signature_type=0,  # EOA signature
-                funder=settings.proxy_wallet,  # FIX: Use proxy_wallet from settings
+                signature_type=settings.signature_type,
+                funder=settings.proxy_wallet,
             )
             
             # Get balance for COLLATERAL (USDC)
-            balance_response = await client.get_balance_allowance(
-                asset_type=AssetType.COLLATERAL
-            )
+            # FIX: Use BalanceAllowanceParams with asset_type="COLLATERAL"
+            params = BalanceAllowanceParams(asset_type="COLLATERAL")
+            balance_response = client.get_balance_allowance(params)
             
             balance = float(balance_response.get('balance', 0))
             logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
