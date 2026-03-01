@@ -169,14 +169,66 @@ class PolymarketDataClient:
 
     async def get_usdc_balance(self) -> float:
         """
-        Get USDC balance using py-clob-client.
+        Get USDC balance using Polymarket Builder API Key.
         
-        SIMPLIFIED: Skip authentication, just return DB snapshot or 0.
-        py-clob-client authentication is complex and requires proper setup.
-        For production, use the existing PolymarketClient with proper auth.
+        Uses API Key + Secret + Passphrase from .env to authenticate.
+        Falls back to 0.0 if credentials are not configured.
         
-        Returns 0.0 to indicate balance fetch is disabled.
+        Returns balance as float.
         """
-        logger.warning("[PolymarketClient] Balance fetch via CLOB disabled - returning 0.0")
-        logger.info("[PolymarketClient] Use DB snapshots for capital tracking instead")
-        return 0.0
+        # Check if API credentials are configured
+        if not settings.polymarket_api_key or not settings.polymarket_api_secret:
+            logger.warning("[PolymarketClient] API Key/Secret not configured - returning 0.0")
+            logger.info("[PolymarketClient] Add POLYMARKET_API_KEY and POLYMARKET_API_SECRET to .env")
+            return 0.0
+        
+        try:
+            # Use httpx to call the balance endpoint with API auth
+            import hmac
+            import hashlib
+            import time
+            import base64
+            
+            timestamp = str(int(time.time()))
+            method = "GET"
+            path = "/balances"
+            
+            # Create signature (HMAC-SHA256)
+            message = timestamp + method + path
+            signature = hmac.new(
+                settings.polymarket_api_secret.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+            signature_b64 = base64.b64encode(signature).decode('utf-8')
+            
+            headers = {
+                "POLY-API-KEY": settings.polymarket_api_key,
+                "POLY-SIGNATURE": signature_b64,
+                "POLY-TIMESTAMP": timestamp,
+                "POLY-PASSPHRASE": settings.polymarket_api_passphrase or "",
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{settings.polymarket_host}{path}",
+                    headers=headers
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            
+            # Extract USDC balance
+            balance = 0.0
+            if isinstance(data, dict):
+                # Check for USDC balance (asset_id or symbol)
+                for asset in data.get('balances', []):
+                    if asset.get('symbol') == 'USDC' or asset.get('asset') == 'USDC':
+                        balance = float(asset.get('balance', 0))
+                        break
+            
+            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
+            return balance
+            
+        except Exception as e:
+            logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
+            return 0.0

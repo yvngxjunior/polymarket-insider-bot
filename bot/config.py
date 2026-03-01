@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     proxy_wallet: str
     chain_id: int = 137
     signature_type: int = Field(default=0, description="Signature type (0=EOA, 1=EIP712, 2=POLY_PROXY)")
+    
+    # NEW: Polymarket API Key (Builder Keys) for authenticated endpoints
+    polymarket_api_key: Optional[str] = Field(default=None, description="Polymarket Builder API Key")
+    polymarket_api_secret: Optional[str] = Field(default=None, description="Polymarket API Secret")
+    polymarket_api_passphrase: Optional[str] = Field(default=None, description="Polymarket API Passphrase")
 
     # ── Telegram ─────────────────────────────────────────────────────────────────
     telegram_bot_token: str
