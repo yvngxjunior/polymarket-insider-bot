@@ -183,6 +183,7 @@ class WhaleTracker:
                         
                         if not existing:
                             # Auto-add avec score conservateur
+                            now = datetime.utcnow()
                             new_wallet = TrackedWallet(
                                 address=wallet_lower,
                                 label=f"Whale {wallet_addr[:10]}",
@@ -192,7 +193,8 @@ class WhaleTracker:
                                 total_profit_usd=amount,
                                 is_active=True,
                                 is_whale=True,
-                                added_at=datetime.utcnow(),
+                                first_seen=now,
+                                last_activity=now,
                             )
                             db.add(new_wallet)
                             added_count += 1
@@ -200,6 +202,7 @@ class WhaleTracker:
                         else:
                             # Update is_whale flag
                             existing.is_whale = True
+                            existing.last_activity = datetime.utcnow()
                     
                     db.commit()
                     
