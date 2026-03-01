@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import asyncio
+import os
+from pathlib import Path
 from datetime import datetime
 
 from bot.config import get_settings
@@ -67,6 +69,56 @@ class TrailingSLConfig(BaseModel):
     min_locked_profit_pct: float = Field(0.10, ge=0.0, le=1.0, description="Minimum locked profit")
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+def update_env_file(key: str, value: str):
+    """
+    Update a key in .env file. Creates file if not exists.
+    Preserves comments and other variables.
+    """
+    env_path = Path(".env")
+    
+    # Read existing lines
+    if env_path.exists():
+        with open(env_path, 'r') as f:
+            lines = f.readlines()
+    else:
+        lines = []
+    
+    # Find and update the key
+    key_found = False
+    new_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith('#'):
+            new_lines.append(line)
+            continue
+        
+        # Check if this is our key
+        if '=' in stripped:
+            var_name = stripped.split('=')[0].strip()
+            if var_name.upper() == key.upper():
+                new_lines.append(f"{key.upper()}={value}\n")
+                key_found = True
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    
+    # Append key if not found
+    if not key_found:
+        new_lines.append(f"{key.upper()}={value}\n")
+    
+    # Write back
+    with open(env_path, 'w') as f:
+        f.writelines(new_lines)
+    
+    logger.info(f"[API] Updated .env: {key.upper()}={value}")
+
+# ============================================================================
 # Endpoints
 # ============================================================================
 
@@ -105,28 +157,32 @@ async def get_settings_api() -> Dict[str, Any]:
 
 @app.post("/api/settings")
 async def update_settings(request: SettingsUpdateRequest) -> Dict[str, Any]:
-    """Update bot settings (requires restart to fully apply)"""
+    """Update bot settings and persist to .env file"""
     updated_fields = []
     
-    # Update in-memory settings (will be lost on restart)
+    # Update in-memory settings
     if request.dry_run is not None:
         settings.dry_run = request.dry_run
+        update_env_file("DRY_RUN", "true" if request.dry_run else "false")
         updated_fields.append("dry_run")
-        logger.info(f"[API] Dry run mode set to: {request.dry_run}")
+        logger.warning(f"[API] 🔥 Dry run mode set to: {request.dry_run}")
     
     if request.max_trade_amount is not None:
         settings.max_trade_amount = request.max_trade_amount
+        update_env_file("MAX_TRADE_AMOUNT", str(request.max_trade_amount))
         updated_fields.append("max_trade_amount")
     
     if request.min_win_rate is not None:
         settings.min_win_rate = request.min_win_rate
+        update_env_file("MIN_WIN_RATE", str(request.min_win_rate))
         updated_fields.append("min_win_rate")
     
     return {
         "status": "updated",
         "updated_fields": updated_fields,
-        "message": "Settings updated in-memory. Restart bot to persist changes to .env",
+        "message": "Settings updated and persisted to .env",
         "dry_run": settings.dry_run,
+        "restart_recommended": len(updated_fields) > 0,
     }
 
 # ----------------------------------------------------------------------------
