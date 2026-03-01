@@ -47,10 +47,11 @@ def _decay_weight(trade_timestamp: Optional[str]) -> float:
 
 
 def _safe_float(value, default: float = 0.0) -> float:
-    """
-    FIX INSIDER-1: conversion float robuste.
-    Evite float(None) -> TypeError quand l'API retourne null
-    sur les champs usdcSize / tradeSize.
+    """Robust float conversion for Polymarket API numeric fields.
+    
+    Official docs specify numeric fields like `size`, `usdcSize`, and `price`
+    as numbers, but older payloads or edge-cases can contain null/strings.
+    This helper prevents TypeError/ValueError in those cases.
     """
     if value is None:
         return default
@@ -61,14 +62,24 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 
 class InsiderScanner:
-    """
-    Detecte les wallets a haut win-rate (insiders potentiels).
-    Win rate pondere par recence, series de pertes, score de timing.
-
-    FIX #7        -- consecutive_losses : remis a 0 des qu'un trade gagnant est detecte.
-    FIX INSIDER-1 -- _safe_float() evite TypeError sur usdcSize/tradeSize null.
-    FIX INSIDER-2 -- _known_trades n'indexe plus les id vides ('').
-    FIX INSIDER-3 -- refresh_tracked_wallets() limite la concurrence (Semaphore 20).
+    """Detects high win-rate wallets (potential insiders) on Polymarket.
+    
+    Win rate calculated using proper /activity schema:
+    - Entry cost (BUY): size * price
+    - Exit value (REDEEM/SELL): usdcSize
+    - Profit: usdcSize - (size * price)
+    
+    Official docs:
+    - /activity schema: https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
+    - Fields: type, size (tokens), usdcSize (USDC.e), price (0-1), asset, side
+    
+    FIXES:
+    - FIX #7        -- consecutive_losses reset on first win
+    - FIX INSIDER-1 -- _safe_float() prevents TypeError on null fields
+    - FIX INSIDER-2 -- _known_trades filters empty IDs
+    - FIX INSIDER-3 -- Semaphore(20) prevents API rate-limit
+    - FIX INSIDER-4 -- Correct PnL: removed non-existent 'tradeSize' field,
+                       now uses size*price (entry cost) vs usdcSize (exit value)
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -76,10 +87,21 @@ class InsiderScanner:
         self._known_trades: dict[str, set[str]] = {}
 
     async def analyze_wallet(self, wallet_address: str) -> WalletAnalysis:
+        """Analyze wallet performance using official /activity endpoint schema.
+        
+        PnL calculation aligned with Polymarket Data-API:
+        1. Filter resolved trades (type=REDEEM or SELL)
+        2. Calculate entry cost: size * price (shares bought * entry price)
+        3. Calculate exit value: usdcSize (USDC received on exit)
+        4. Profit: exit_value - entry_cost
+        
+        This matches community best practices for insider tracking.
+        """
         trades = await self.client.get_wallet_trades(wallet_address, limit=300)
         if not trades:
             return self._empty_analysis(wallet_address, "No trade history")
 
+        # Filter resolved positions (closed trades)
         resolved = [t for t in trades if t.get("type") in ("REDEEM", "SELL")]
         total = len(resolved)
 
@@ -89,47 +111,79 @@ class InsiderScanner:
                 f"Not enough trades ({total} < {settings.min_trades_count})"
             )
 
-        # FIX INSIDER-1: _safe_float() a la place de float(..., 0)
-        # -> robuste si l'API retourne null sur usdcSize ou tradeSize
-        profitable_trades = [
-            t for t in resolved
-            if _safe_float(t.get("usdcSize")) > _safe_float(t.get("tradeSize"))
-        ]
-        win_rate = len(profitable_trades) / total
+        # FIX INSIDER-4: Correct PnL calculation using official schema
+        # Entry cost = size * price (tokens bought × entry price)
+        # Exit value = usdcSize (USDC.e received on close)
+        # Profitable = exit > entry
+        profitable_trades = []
+        for t in resolved:
+            size = _safe_float(t.get("size"))
+            price = _safe_float(t.get("price"))
+            usdc_size = _safe_float(t.get("usdcSize"))
+            
+            # Entry cost in USDC
+            entry_cost = size * price
+            
+            # Profitable if exit value > entry cost
+            if usdc_size > entry_cost:
+                profitable_trades.append(t)
+        
+        win_rate = len(profitable_trades) / total if total > 0 else 0
 
-        weighted_wins = sum(
-            _decay_weight(t.get("timestamp"))
-            for t in resolved
-            if _safe_float(t.get("usdcSize")) > _safe_float(t.get("tradeSize"))
-        )
-        total_weight = sum(_decay_weight(t.get("timestamp")) for t in resolved)
+        # Weighted win rate (decay by recency)
+        weighted_wins = 0.0
+        total_weight = 0.0
+        for t in resolved:
+            weight = _decay_weight(t.get("timestamp"))
+            total_weight += weight
+            
+            size = _safe_float(t.get("size"))
+            price = _safe_float(t.get("price"))
+            usdc_size = _safe_float(t.get("usdcSize"))
+            entry_cost = size * price
+            
+            if usdc_size > entry_cost:
+                weighted_wins += weight
+        
         win_rate_weighted = weighted_wins / total_weight if total_weight > 0 else 0
 
-        # FIX #7 -- calcul strict : on parcourt les trades recents dans l'ordre
-        # et on s'arrete des le premier trade gagnant.
+        # FIX #7 -- Consecutive losses: stop at first win
         recent = sorted(resolved, key=lambda t: t.get("timestamp", ""), reverse=True)[:10]
         consecutive_losses = 0
         for t in recent:
-            is_loss = _safe_float(t.get("usdcSize")) <= _safe_float(t.get("tradeSize"))
+            size = _safe_float(t.get("size"))
+            price = _safe_float(t.get("price"))
+            usdc_size = _safe_float(t.get("usdcSize"))
+            entry_cost = size * price
+            
+            is_loss = usdc_size <= entry_cost
             if is_loss:
                 consecutive_losses += 1
             else:
                 break
 
-        profits = [
-            _safe_float(t.get("usdcSize")) - _safe_float(t.get("tradeSize"))
-            for t in resolved
-        ]
+        # Total profit calculation
+        profits = []
+        for t in resolved:
+            size = _safe_float(t.get("size"))
+            price = _safe_float(t.get("price"))
+            usdc_size = _safe_float(t.get("usdcSize"))
+            entry_cost = size * price
+            profit = usdc_size - entry_cost
+            profits.append(profit)
+        
         total_profit = sum(profits)
-        avg_profit   = total_profit / total if total > 0 else 0
+        avg_profit = total_profit / total if total > 0 else 0
 
+        # Entry timing score (lower entry price = better timing)
         entry_prices = [
             _safe_float(t.get("price"), 0.5)
             for t in profitable_trades
             if _safe_float(t.get("price")) > 0
         ]
         if entry_prices:
-            avg_entry          = sum(entry_prices) / len(entry_prices)
+            avg_entry = sum(entry_prices) / len(entry_prices)
+            # Lower average entry price = higher timing score
             entry_timing_score = max(0.0, min(1.0, 1 - (avg_entry / 0.6)))
         else:
             entry_timing_score = 0.5
@@ -137,6 +191,7 @@ class InsiderScanner:
         score = score_wallet(win_rate_weighted, total, total_profit)
         label = get_score_label(score)
 
+        # Disqualify on losing streak
         if consecutive_losses >= 5:
             return WalletAnalysis(
                 address=wallet_address, win_rate=win_rate,
@@ -153,8 +208,8 @@ class InsiderScanner:
             win_rate_weighted >= settings.min_win_rate
             and avg_profit >= 1.0
         )
-        # FIX INSIDER-2: filtre les id vides pour eviter de marquer
-        # tous les futurs trades sans id comme 'deja connus'
+        
+        # FIX INSIDER-2: Filter empty IDs to prevent false positives
         self._known_trades[wallet_address] = {
             t.get("id") for t in trades if t.get("id")
         }
@@ -172,8 +227,12 @@ class InsiderScanner:
         )
 
     async def get_new_trades(self, wallet_address: str) -> list[dict]:
+        """Fetch new BUY trades for copy-trading.
+        
+        Only tracks type=BUY from /activity endpoint for real-time signal.
+        """
         trades = await self.client.get_wallet_trades(wallet_address, limit=20)
-        known  = self._known_trades.get(wallet_address, set())
+        known = self._known_trades.get(wallet_address, set())
         new_trades = []
         for trade in trades:
             trade_id = trade.get("id", "")
@@ -185,12 +244,14 @@ class InsiderScanner:
         return new_trades
 
     async def refresh_tracked_wallets(self) -> list[WalletAnalysis]:
+        """Refresh all tracked wallets from leaderboard.
+        
+        FIX INSIDER-3: Uses Semaphore(20) to prevent API rate-limit.
+        """
         logger.info("Starting full wallet refresh...")
         top_traders = await self.client.get_top_traders(limit=300)
 
-        # FIX INSIDER-3: Semaphore pour limiter la concurrence
-        # L'ancienne version lancait jusqu'a 300 requetes HTTP simultanees
-        # -> risque de rate-limit ou ban temporaire de l'API Polymarket.
+        # FIX INSIDER-3: Rate-limit protection
         sem = asyncio.Semaphore(_REFRESH_SEMAPHORE_SIZE)
 
         async def _analyze_with_sem(address: str) -> WalletAnalysis:
@@ -214,7 +275,7 @@ class InsiderScanner:
                     existing = db.get(TrackedWallet, analysis.address)
                     if existing and existing.is_active and analysis.consecutive_losses >= 5:
                         existing.is_active = False
-                        # FIX #7 -- persiste le consecutive_losses meme en cas de desactivation
+                        # FIX #7 -- Persist consecutive_losses on deactivation
                         existing.consecutive_losses = analysis.consecutive_losses
                         logger.warning(f"Wallet {analysis.address[:8]}... DEACTIVATED")
                     continue
@@ -228,13 +289,13 @@ class InsiderScanner:
                         f"| WR: {analysis.win_rate_weighted:.0%}"
                     )
 
-                wallet.win_rate            = analysis.win_rate_weighted
-                wallet.total_trades        = analysis.total_trades
-                wallet.total_profit_usd    = analysis.total_profit_usd
-                wallet.score               = analysis.score
-                wallet.is_active           = True
-                wallet.consecutive_losses  = analysis.consecutive_losses
-                wallet.entry_timing_score  = analysis.entry_timing_score
+                wallet.win_rate = analysis.win_rate_weighted
+                wallet.total_trades = analysis.total_trades
+                wallet.total_profit_usd = analysis.total_profit_usd
+                wallet.score = analysis.score
+                wallet.is_active = True
+                wallet.consecutive_losses = analysis.consecutive_losses
+                wallet.entry_timing_score = analysis.entry_timing_score
                 results.append(analysis)
 
         logger.info(f"Refresh done. {len(results)} qualified wallets.")
