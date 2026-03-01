@@ -5,7 +5,7 @@ import TrailingSLPanel from './TrailingSLPanel'
 import WalletsPanel from './WalletsPanel'
 import LiveStream from './LiveStream'
 import SettingsSidebar from './SettingsSidebar'
-import { fetchAPI } from '../utils/api'
+import { fetchAPI, postAPI } from '../utils/api'
 
 const Dashboard = ({ stats }) => {
   const [portfolio, setPortfolio] = useState(null)
@@ -53,26 +53,23 @@ const Dashboard = ({ stats }) => {
   const handleSaveConfig = async (newConfig) => {
     try {
       // Update bot settings (dry_run, max_trade_amount, etc.)
-      await fetchAPI('/settings', {
-        method: 'POST',
-        body: JSON.stringify({
-          dry_run: newConfig.dry_run,
-          max_trade_amount: newConfig.max_trade_amount,
-          min_win_rate: newConfig.min_win_rate,
-        }),
+      const settingsResult = await postAPI('/settings', {
+        dry_run: newConfig.dry_run,
+        max_trade_amount: newConfig.max_trade_amount,
+        min_win_rate: newConfig.min_win_rate,
       })
       
+      console.log('Settings updated:', settingsResult)
+      
       // Update trailing SL config
-      await fetchAPI('/features/trailing-sl/config', {
-        method: 'POST',
-        body: JSON.stringify({
-          activation_gain_pct: newConfig.trailing_sl_activation,
-          trail_distance_pct: newConfig.trailing_sl_distance,
-          min_locked_profit_pct: 0.10, // default
-        }),
+      await postAPI('/features/trailing-sl/config', {
+        activation_gain_pct: newConfig.trailing_sl_activation,
+        trail_distance_pct: newConfig.trailing_sl_distance,
+        min_locked_profit_pct: 0.10,
       })
       
       console.log('Configuration saved:', newConfig)
+      
       // Update local config state
       setConfig(newConfig)
       
