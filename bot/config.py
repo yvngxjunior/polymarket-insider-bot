@@ -163,6 +163,32 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Whale Exit Tracking (v3.3) ────────────────────────────────────────────────
+    whale_exit_tracking: bool = Field(
+        default=True,
+        description="Active le tracking des sorties (REDEEM/SELL) des whales"
+    )
+    whale_exit_alert: bool = Field(
+        default=True,
+        description="Envoie une alerte Telegram quand une whale sort d'un marché que tu détiens"
+    )
+    whale_auto_exit: bool = Field(
+        default=False,
+        description="⚠️ DANGER: Force la sortie automatique quand une whale vend (peut causer des pertes)"
+    )
+    whale_exit_window_hours: int = Field(
+        default=6,
+        ge=1,
+        le=72,
+        description="Fenêtre de temps (heures) pour tracker les exits après notre entrée"
+    )
+    whale_exit_min_score: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Score minimum de la whale pour déclencher une alerte exit (évite le bruit)"
+    )
+
     # ── Position Sizer Tiered (v2.7) ──────────────────────────────────────────────
     tiered_multipliers: str = Field(
         default="",
