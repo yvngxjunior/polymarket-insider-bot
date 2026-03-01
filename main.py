@@ -1,11 +1,12 @@
 """
-PolyInsider Bot v3.3 (PHASE 2)
+PolyInsider Bot v3.3 (PHASE 3)
 ===============================
-Architecture 7 phases + 5 background tasks:
+Architecture 7 phases + 6 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
   1.5 Whale Exit Monitor — track REDEEM/SELL from whales [v3.3]
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
+  3.5 Hot Market Detection — explosive volume + whale clustering [PHASE 3]
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
@@ -16,6 +17,7 @@ Architecture 7 phases + 5 background tasks:
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
   └ FeaturesManager    — Trailing SL + Auto Discovery      [background]
   └ WhaleExitMonitor   — track whale exits + alerts       [background, 5min] [v3.3]
+  └ HotMarketDetector  — viral markets early detection    [main loop, 10min] [PHASE 3]
 
 v3.3 NEW FEATURES:
   ✨ WHALE EXIT TRACKING — Monitor when whales REDEEM/SELL positions
@@ -28,6 +30,13 @@ PHASE 2 NEW FEATURES:
   ✨ ACCURATE WIN RATES — Calculate true win rates using REDEEM events
   ✨ CONVICTION SCORING — Enrich whale scores based on exit behavior patterns
   ✨ ENTRY TIMING — Score wallets on early vs late market entry
+
+PHASE 3 NEW FEATURES:
+  ✨ HOT MARKET DETECTION — Detect explosive volume spikes + whale clustering
+     - Volume Spike: 3x+ normal volume in 1-2h window
+     - Whale Cluster: 3+ tracked whales entering same market
+     - Momentum: 10%+ price change in 1h
+     - Fast-track copy: Optional immediate copy on hot signals
 
 v3.2 features:
   ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
@@ -65,7 +74,8 @@ from bot.trading.polymarket import PolymarketDataClient
 from bot.scanner.insider import InsiderScanner, _safe_float
 from bot.scanner.whale import WhaleTracker
 from bot.scanner.whale_exit_monitor import WhaleExitMonitor
-from bot.scanner.activity_analyzer import ActivityAnalyzer  # PHASE 2
+from bot.scanner.activity_analyzer import ActivityAnalyzer
+from bot.scanner.hot_market_detector import HotMarketDetector  # PHASE 3
 from bot.scanner.wallet_refresher import WalletRefresher
 from bot.scanner.wallet_scanner import WalletScanner
 from bot.scanner.convergence import ConvergenceDetector
@@ -299,6 +309,7 @@ async def main_loop(
     scanner: InsiderScanner,
     whale_tracker: WhaleTracker,
     convergence_detector: ConvergenceDetector,
+    hot_market_detector: HotMarketDetector,  # PHASE 3
     arbitrage_scanner: ArbitrageScanner,
     market_scanner: MarketScanner,
     llm_agent: LLMAgent,
@@ -317,6 +328,7 @@ async def main_loop(
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
     WHALE_EVERY  = 4
+    HOT_MARKET_EVERY = 10  # PHASE 3: every ~5 minutes (10 * 30s = 5min)
     ARB_EVERY    = 20
     MARKET_EVERY = settings.market_scan_every_n_loops
     LLM_EVERY    = settings.llm_scan_every_n_loops
@@ -407,6 +419,22 @@ async def main_loop(
                             f"({addr[:10]} {trade.get('asset', '?')[:12]}): {e}"
                         )
 
+            # PHASE 3: Hot Market Detection (every ~5 min)
+            if loop_count % HOT_MARKET_EVERY == 0:
+                try:
+                    hot_signals = await hot_market_detector.scan(
+                        lookback_hours=2,
+                        min_volume_multiplier=3.0,
+                        min_whale_count=2,
+                    )
+                    
+                    # Notify top 3 hot markets
+                    for signal in hot_signals[:3]:
+                        logger.info(f"[HOT_MARKET] {signal}")
+                        await notifier.notify_hot_market(signal)
+                except Exception as e:
+                    logger.debug(f"[HOT_MARKET] Scan error: {e}")
+
             # Phase 4 — Arbitrage cross-platform
             if loop_count % ARB_EVERY == 0:
                 for opp in (await arbitrage_scanner.scan())[:5]:
@@ -471,8 +499,8 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v3.3 (PHASE 2)")
-    logger.info("  Copy · Whale · WhaleExit · Conv · Arb · Scanner · LLM · ExitMgr")
+    logger.info("  PolyInsider Bot v3.3 (PHASE 3)")
+    logger.info("  Copy · Whale · WhaleExit · Conv · HotMarket · Arb · LLM")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
     logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
@@ -497,9 +525,10 @@ async def run() -> None:
             logger.info("     └─ Auto-Exit: Config enabled but NOT IMPLEMENTED (too risky)")
     else:
         logger.info("  Whale Exit Tracking:      OFF")
-    # PHASE 2
+    # PHASE 2+3
     logger.info("  ✨ Activity Analytics:     ON 📊 (accurate win rates via REDEEM)")
     logger.info("  ✨ Conviction Scoring:     ON 🎯 (whale exit pattern analysis)")
+    logger.info("  ✨ Hot Market Detection:   ON 🔥 (explosive volume + whale clustering)")
     
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
@@ -520,7 +549,8 @@ async def run() -> None:
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
     whale_exit_monitor   = WhaleExitMonitor(client=client)
-    activity_analyzer    = ActivityAnalyzer(client=client)  # PHASE 2
+    activity_analyzer    = ActivityAnalyzer(client=client)
+    hot_market_detector  = HotMarketDetector(client=client)  # PHASE 3
     convergence_detector = ConvergenceDetector(client=client)
     arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner       = MarketScanner(max_concurrent=8)
@@ -562,8 +592,8 @@ async def run() -> None:
         notifier=notifier,
         interval_minutes=60,
         wallet_scanner=wallet_scanner,
-        activity_analyzer=activity_analyzer,  # PHASE 2
-        whale_exit_monitor=whale_exit_monitor,  # PHASE 2
+        activity_analyzer=activity_analyzer,
+        whale_exit_monitor=whale_exit_monitor,
     )
     
     features_manager = get_features_manager(
@@ -611,6 +641,7 @@ async def run() -> None:
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
             convergence_detector=convergence_detector,
+            hot_market_detector=hot_market_detector,  # PHASE 3
             arbitrage_scanner=arbitrage_scanner, market_scanner=market_scanner,
             llm_agent=llm_agent, engine=engine, notifier=notifier, client=client,
             risk_manager=risk_manager, position_manager=position_manager,
