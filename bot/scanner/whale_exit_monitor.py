@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from bot.config import get_settings
-from bot.database import get_db, TrackedWallet, Position
+from bot.database import get_db, TrackedWallet, CopiedTrade, TradeStatus
 from bot.trading.polymarket import PolymarketDataClient
 from bot.utils.logger import logger
 
@@ -37,7 +37,7 @@ class WhaleExitEvent:
     timestamp: datetime
     title: str
     matches_our_position: bool = False
-    position_id: Optional[int] = None
+    trade_id: Optional[int] = None  # CopiedTrade.id if matches
 
 
 @dataclass
@@ -180,19 +180,22 @@ class WhaleExitMonitor:
         self,
         exit_events: list[WhaleExitEvent]
     ) -> list[WhaleExitEvent]:
-        """Match exit events to our open positions."""
+        """Match exit events to our open positions (CopiedTrade with status=EXECUTED)."""
         try:
             with get_db() as db:
-                open_positions = db.query(Position).filter(
-                    Position.status == "open"
+                # Get open positions (executed trades without PnL)
+                open_trades = db.query(CopiedTrade).filter(
+                    CopiedTrade.status == TradeStatus.EXECUTED,
+                    CopiedTrade.pnl_usdc.is_(None),  # Not closed yet
                 ).all()
 
                 for event in exit_events:
-                    for pos in open_positions:
-                        if (event.condition_id == pos.condition_id
-                            and event.token_id == pos.token_id):
+                    for trade in open_trades:
+                        # Match by market_id (condition_id) and token_id
+                        if (event.condition_id == trade.market_id
+                            and event.token_id == trade.token_id):
                             event.matches_our_position = True
-                            event.position_id = pos.id
+                            event.trade_id = trade.id
                             break
 
         except Exception as e:
