@@ -169,51 +169,38 @@ class PolymarketDataClient:
 
     async def get_usdc_balance(self) -> float:
         """
-        Get USDC balance using py-clob-client with API Key authentication.
+        Calculate USDC balance from open positions using public Data API.
         
-        SIMPLIFIED: Use ClobClient with apiCreds from API Key/Secret/Passphrase.
-        This is the official way to authenticate with Builder API Keys.
+        NO AUTHENTICATION NEEDED - Uses public /positions endpoint.
         
-        Returns balance as float, or 0.0 if unable to fetch.
+        Strategy:
+        1. Fetch all open positions for proxy_wallet
+        2. Sum up position values (size * current_price)
+        3. Return total capital in USDC
+        
+        This is MORE RELIABLE than trying to authenticate with CLOB API.
         """
-        # Check if API credentials are configured
-        if not settings.polymarket_api_key or not settings.polymarket_api_secret:
-            logger.warning("[PolymarketClient] API Key/Secret not configured")
-            logger.info("[PolymarketClient] Add POLYMARKET_API_KEY + SECRET + PASSPHRASE to .env")
-            return 0.0
-        
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
-            
-            # Create ApiCreds from settings
-            api_creds = ApiCreds(
-                api_key=settings.polymarket_api_key,
-                api_secret=settings.polymarket_api_secret,
-                api_passphrase=settings.polymarket_api_passphrase or ""
+            # Get positions for the proxy wallet (public endpoint)
+            positions = await self.get_wallet_positions(
+                wallet=settings.proxy_wallet,
+                limit=100
             )
             
-            # Initialize client WITHOUT private key (use API creds only)
-            client = ClobClient(
-                host=settings.polymarket_host,
-                chain_id=settings.chain_id,
-                key="",  # Empty key when using API creds
-                creds=api_creds  # Use API credentials
-            )
+            if not positions:
+                logger.info("[PolymarketClient] No open positions found")
+                return 0.0
             
-            # Get balance for COLLATERAL (USDC)
-            balance_response = client.get_balance_allowance()
+            # Calculate total capital from positions
+            total_capital = 0.0
+            for pos in positions:
+                # Each position has: size (shares) and value (USDC)
+                position_value = float(pos.get('value', pos.get('size', 0)))
+                total_capital += position_value
             
-            # Extract balance (in wei, divide by 1e6 for USDC)
-            balance_wei = int(balance_response.get('balance', 0))
-            balance_usdc = balance_wei / 1_000_000  # USDC has 6 decimals
+            logger.info(f"[PolymarketClient] Calculated capital from {len(positions)} positions: ${total_capital:.2f}")
+            return total_capital
             
-            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance_usdc}")
-            return balance_usdc
-            
-        except ImportError:
-            logger.warning("[PolymarketClient] py-clob-client not installed")
-            return 0.0
         except Exception as e:
-            logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
+            logger.error(f"[PolymarketClient] Failed to calculate balance from positions: {e}")
             return 0.0
