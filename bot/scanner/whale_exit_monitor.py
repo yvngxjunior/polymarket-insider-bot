@@ -15,6 +15,9 @@ PHASE 1: Now uses complete /activity API to capture:
 Docs:
 - /activity REDEEM schema: https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
 - Exit strategies: https://news.stand.trade/p/redeeming-vs-splitting-vs-merging
+
+FIX: Increased limits from 100/300 to 1000 to properly capture REDEEM events
+     which are often buried deep in history (1% of total events).
 """
 
 import asyncio
@@ -68,6 +71,11 @@ class WhaleExitMonitor:
     - Calculate hold time and conviction metrics
     - Alert when whale exits a market we're holding
     - Optional auto-exit on whale SELL signal
+    
+    FIX: Increased API limits to capture REDEEM events properly:
+    - check_whale_exits: 500 limit (recent exits monitoring)
+    - analyze_exit_patterns: 1000 limit (historical analysis)
+    - REDEEM events are ~1% of total activity, need large sample
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -84,6 +92,8 @@ class WhaleExitMonitor:
         
         PHASE 1: Now uses get_wallet_activity() instead of get_wallet_trades()
         to capture REDEEM events properly.
+        
+        FIX: Increased limit to 500 to ensure REDEEM capture (was 100).
         
         Args:
             whale_addresses: List of whale wallet addresses to monitor
@@ -126,12 +136,15 @@ class WhaleExitMonitor:
         
         PHASE 1: Uses get_wallet_activity() to capture ALL activity types.
         Filters for SELL (type=TRADE + side=SELL) and REDEEM (type=REDEEM).
+        
+        FIX: Increased limit to 500 (was 100) to capture REDEEM events.
         """
         try:
             # PHASE 1: Use complete /activity API (no type filter)
+            # FIX: 500 limit to ensure we capture REDEEM events
             activity = await self.client.get_wallet_activity(
                 wallet=wallet,
-                limit=100,
+                limit=500,  # Increased from 100
                 event_type=None,  # Get all types
             )
             
@@ -252,12 +265,16 @@ class WhaleExitMonitor:
         - Sell rate (early exit before resolution)
         - Average hold time
         - Conviction score (higher = better)
+        
+        FIX: Increased limit to 1000 (was 300) to capture enough REDEEM events
+             for accurate statistics.
         """
         try:
             # PHASE 1: Get complete activity (all types)
+            # FIX: 1000 limit for historical analysis
             activity = await self.client.get_wallet_activity(
                 wallet=wallet,
-                limit=300,
+                limit=1000,  # Increased from 300
             )
             
             cutoff = datetime.now() - timedelta(days=lookback_days)
