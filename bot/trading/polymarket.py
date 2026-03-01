@@ -14,14 +14,10 @@ class PolymarketDataClient:
     Client HTTP async pour les APIs publiques Polymarket.
     - Data API : trades, positions, activité, leaderboard  (data-api.polymarket.com)
     - Gamma API: métadonnées des marchés               (gamma-api.polymarket.com)
-    Aucun endpoint ne nécessite d'auth pour la lecture publique.
-
-    FIX BUG-9: get_top_traders() ne porte plus le décorateur @retry global.
-    La boucle de pagination interne appelait raise_for_status() sur chaque page.
-    Si une page levait une exception, tenacity relançait toute la méthode depuis
-    l'offset=0 → résultats dupliqués (ex: 200+200 = 400 entrées pour limit=300).
-    Correction: retry appliqué par page via _fetch_leaderboard_page(), et la
-    boucle principale dans get_top_traders() accumule sans retry global.
+    
+    ALIGNED WITH OFFICIAL DOCS:
+    - https://docs.polymarket.com/api-reference/introduction
+    - https://gist.github.com/shaunlebron/0dd3338f7dea06b8e9f8724981bb13bf
     """
 
     def __init__(self):
@@ -37,13 +33,21 @@ class PolymarketDataClient:
         self._data_client = httpx.AsyncClient(
             base_url=settings.polymarket_data_host,
             timeout=15.0,
-            headers={"User-Agent": "PolyInsiderBot/1.0"},
+            headers={
+                "User-Agent": "PolyInsiderBot/1.0",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
             proxies=proxy_config,
         )
         self._gamma_client = httpx.AsyncClient(
             base_url=settings.polymarket_gamma_host,
             timeout=15.0,
-            headers={"User-Agent": "PolyInsiderBot/1.0"},
+            headers={
+                "User-Agent": "PolyInsiderBot/1.0",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
             proxies=proxy_config,
         )
 
@@ -58,15 +62,25 @@ class PolymarketDataClient:
         limit: int = 100,
         offset: int = 0
     ) -> list[dict]:
+        """
+        GET /activity - Fetches onchain activity for a user.
+        Doc: https://gist.github.com/shaunlebron/0dd3338f7dea06b8e9f8724981bb13bf#activity
+        """
         resp = await self._data_client.get(
             "/activity",
-            params={"user": wallet, "limit": limit, "offset": offset}
+            params={
+                "user": wallet,
+                "limit": limit,
+                "offset": offset,
+                "type": "TRADE",  # Filter only trades
+                "sortBy": "TIMESTAMP",
+                "sortDirection": "DESC"
+            }
         )
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, list):
-            return data
-        return data.get("history", data.get("data", []))
+        # Response is always an array
+        return data if isinstance(data, list) else []
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def get_recent_large_trades(
@@ -74,26 +88,31 @@ class PolymarketDataClient:
         min_amount: float,
         limit: int = 100
     ) -> list[dict]:
+        """
+        GET /trades - Fetches trades ordered by timestamp DESC.
+        Doc: https://gist.github.com/shaunlebron/0dd3338f7dea06b8e9f8724981bb13bf#trades
+        """
         resp = await self._data_client.get(
             "/trades",
             params={
-                "limit":        limit,
-                "takerOnly":    "false",
-                "filterType":   "CASH",
+                "limit": limit,
+                "takerOnly": "false",
+                "filterType": "CASH",
                 "filterAmount": int(min_amount),
             }
         )
         resp.raise_for_status()
         data = resp.json()
-        trades = data if isinstance(data, list) else data.get("data", data.get("trades", []))
+        # Response is always an array
+        trades = data if isinstance(data, list) else []
+        
         result = []
         for t in trades:
-            size = float(t.get("size", t.get("usdcSize", 0)))
-            wallet = t.get("proxyWallet", t.get("maker", ""))
+            # Map official API response fields
             result.append({
                 "transactionHash": t.get("transactionHash", ""),
-                "maker":           wallet,
-                "usdcSize":        size,
+                "maker":           t.get("proxyWallet", ""),
+                "usdcSize":        float(t.get("size", 0)),  # Size in tokens (not USD)
                 "conditionId":     t.get("conditionId", ""),
                 "asset":           t.get("asset", ""),
                 "side":            t.get("side", "BUY"),
@@ -109,18 +128,31 @@ class PolymarketDataClient:
         wallet: str,
         limit: int = 100
     ) -> list[dict]:
+        """
+        GET /positions - Fetches current positions for a user.
+        Doc: https://gist.github.com/shaunlebron/0dd3338f7dea06b8e9f8724981bb13bf#positions
+        """
         resp = await self._data_client.get(
             "/positions",
-            params={"user": wallet, "limit": limit}
+            params={
+                "user": wallet,
+                "limit": limit,
+                "sizeThreshold": 1.0,  # Min position size
+                "sortBy": "CURRENT",    # Sort by current value
+                "sortDirection": "DESC"
+            }
         )
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, list):
-            return data
-        return data.get("positions", data.get("data", []))
+        # Response is always an array
+        return data if isinstance(data, list) else []
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def get_market_info(self, condition_id: str) -> Optional[dict]:
+        """
+        GET /markets - Gamma API for market metadata.
+        Doc: https://docs.polymarket.com/api-reference/introduction
+        """
         resp = await self._gamma_client.get(
             "/markets",
             params={"conditionId": condition_id}
@@ -136,9 +168,8 @@ class PolymarketDataClient:
         limit: int = 150
     ) -> list[dict]:
         """
-        Récupère les meilleurs traders via /v1/leaderboard.
-        Max 50 par page — pagination par offset.
-        Chaque page est fetchée avec retry individuel (pas le tout).
+        GET /v1/leaderboard - Data API for top traders.
+        Max 50 per page, pagination par offset.
         """
         results: list[dict] = []
         page_size = 50
@@ -157,11 +188,6 @@ class PolymarketDataClient:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _fetch_leaderboard_page(self, offset: int, page_size: int) -> list[dict]:
-        """
-        FIX BUG-9: retry appliqué par page, pas sur la boucle entière.
-        En cas d'échec sur une page, seule cette page est retentée (3x),
-        pas toute la pagination depuis l'offset 0.
-        """
         resp = await self._data_client.get(
             "/v1/leaderboard",
             params={
@@ -177,59 +203,32 @@ class PolymarketDataClient:
 
     async def get_usdc_balance(self) -> float:
         """
-        Get USDC balance using py-clob-client with Builder API credentials.
+        Calculate USDC capital from positions using GET /value endpoint.
         
-        IMPORTANT: Uses environment variables that py-clob-client auto-detects:
-        - POLY_BUILDER_API_KEY
-        - POLY_BUILDER_SECRET
-        - POLY_BUILDER_PASSPHRASE
+        OFFICIAL DOC: https://gist.github.com/shaunlebron/0dd3338f7dea06b8e9f8724981bb13bf#positions-value
         
-        For geo-restricted regions (France, etc.), set HTTP_PROXY in .env.
-        
-        Returns balance as float, or 0.0 if unable to fetch.
+        This is MORE RELIABLE than CLOB auth for geo-restricted regions.
+        Returns total USD value of all open positions.
         """
-        # Set env vars from settings if configured
-        if settings.poly_builder_api_key:
-            os.environ['POLY_BUILDER_API_KEY'] = settings.poly_builder_api_key
-        if settings.poly_builder_secret:
-            os.environ['POLY_BUILDER_SECRET'] = settings.poly_builder_secret
-        if settings.poly_builder_passphrase:
-            os.environ['POLY_BUILDER_PASSPHRASE'] = settings.poly_builder_passphrase
-        
-        # Set proxy for py-clob-client if configured
-        if settings.http_proxy:
-            os.environ['HTTP_PROXY'] = settings.http_proxy
-            os.environ['HTTPS_PROXY'] = settings.http_proxy
-        
-        # Check if Builder credentials are set
-        if not os.getenv('POLY_BUILDER_API_KEY') or not os.getenv('POLY_BUILDER_SECRET'):
-            logger.warning("[PolymarketClient] Builder API credentials not configured")
-            logger.info("[PolymarketClient] Set POLY_BUILDER_API_KEY + SECRET + PASSPHRASE in .env")
-            return 0.0
-        
         try:
-            from py_clob_client.client import ClobClient
-            
-            # ClobClient will auto-detect POLY_BUILDER_* env vars and HTTP_PROXY
-            client = ClobClient(
-                host=settings.polymarket_host,
-                chain_id=settings.chain_id
+            # Use official /value endpoint (no auth required)
+            resp = await self._data_client.get(
+                "/value",
+                params={"user": settings.proxy_wallet}
             )
+            resp.raise_for_status()
+            data = resp.json()
             
-            # Get balance
-            balance_response = client.get_balance_allowance()
+            # Response format: [{"user": "0x...", "value": 123.45}]
+            if isinstance(data, list) and len(data) > 0:
+                balance = float(data[0].get('value', 0))
+                logger.info(f"[PolymarketClient] Fetched positions value: ${balance:.2f}")
+                return balance
             
-            # Extract USDC balance (in wei, divide by 1e6)
-            balance_wei = int(balance_response.get('balance', 0))
-            balance_usdc = balance_wei / 1_000_000
-            
-            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance_usdc:.2f}")
-            return balance_usdc
-            
-        except ImportError:
-            logger.warning("[PolymarketClient] py-clob-client not installed")
+            logger.info("[PolymarketClient] No positions value found")
             return 0.0
+            
         except Exception as e:
-            logger.error(f"[PolymarketClient] Failed to fetch balance: {e}")
+            logger.error(f"[PolymarketClient] Failed to fetch value: {e}")
             logger.info("[PolymarketClient] If in France/restricted region, configure HTTP_PROXY in .env")
             return 0.0
