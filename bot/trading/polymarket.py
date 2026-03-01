@@ -67,6 +67,7 @@ class PolymarketDataClient:
 
     # ------------------------------------------------------------------
     # Data API — /activity (user on-chain activity)
+    # PHASE 1: Complete /activity implementation for all event types
     # ------------------------------------------------------------------
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
@@ -101,6 +102,109 @@ class PolymarketDataClient:
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, list) else []
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def get_wallet_activity(
+        self,
+        wallet: str,
+        limit: int = 100,
+        offset: int = 0,
+        event_type: Optional[str] = None,
+    ) -> list[dict]:
+        """Fetch complete activity history for a wallet (all event types).
+        
+        PHASE 1: New method to capture ALL activity types:
+        - TRADE (BUY/SELL)
+        - REDEEM (claim winnings after resolution)
+        - SPLIT (create YES+NO positions from collateral)
+        - MERGE (destroy YES+NO to recover collateral)
+        
+        Args:
+            wallet: Wallet address
+            limit: Max results (capped at 500)
+            offset: Pagination offset (capped at 1000)
+            event_type: Filter by specific type (None = all types)
+            
+        Returns:
+            List of activity events with schema:
+            {
+                "type": "TRADE" | "REDEEM" | "SPLIT" | "MERGE",
+                "side": "BUY" | "SELL" (for TRADE only),
+                "asset": "0x...",  # token_id
+                "conditionId": "0x...",
+                "size": float,  # tokens amount
+                "usdcSize": float,  # notional in USDC.e
+                "price": float,  # 0-1 (for TRADE)
+                "timestamp": int,  # unix timestamp
+                "title": str,  # market question
+            }
+        
+        Docs: https://docs.polymarket.com/api-reference/core/get-user-activity
+        """
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, min(int(offset), 1000))
+        
+        params = {
+            "user": wallet.lower(),
+            "limit": limit,
+            "offset": offset,
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "DESC",
+        }
+        
+        if event_type:
+            params["type"] = event_type.upper()
+        
+        try:
+            resp = await self._data_client.get("/activity", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"[PolymarketClient] get_wallet_activity failed for {wallet[:10]}: {e}")
+            return []
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def get_market_activity(
+        self,
+        condition_id: str,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Fetch all activity on a specific market.
+        
+        PHASE 1: Use this to calculate entry timing scores.
+        Get all trades/activity on a market to determine when a wallet
+        entered relative to total market activity.
+        
+        Args:
+            condition_id: Market condition ID
+            limit: Max results (capped at 500)
+            offset: Pagination offset (capped at 1000)
+            
+        Returns:
+            List of activity events (all users) on this market
+        """
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, min(int(offset), 1000))
+        
+        try:
+            resp = await self._data_client.get(
+                "/activity",
+                params={
+                    "market": condition_id,
+                    "limit": limit,
+                    "offset": offset,
+                    "sortBy": "TIMESTAMP",
+                    "sortDirection": "DESC",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"[PolymarketClient] get_market_activity failed: {e}")
+            return []
 
     # ------------------------------------------------------------------
     # Data API — /trades (global trade feed, used for whales)
