@@ -252,6 +252,97 @@ class Settings(BaseSettings):
         description="Minutes minimum entre deux alertes de santé (anti-spam)",
     )
 
+    # ══════════════════════════════════════════════════════════════════════════════
+    # ── AUTO-TRADING EXECUTOR (v3.4 - Inspired by dexorynlabs) ───────────────────
+    # ══════════════════════════════════════════════════════════════════════════════
+    
+    auto_trading_enabled: bool = Field(
+        default=False,
+        description="🚀 Active l'exécution automatique des trades (OFF par défaut pour sécurité)",
+    )
+    
+    executor_dry_run: bool = Field(
+        default=True,
+        description="🎭 Mode simulation : log les trades mais ne les exécute pas (recommandé pour tester)",
+    )
+    
+    # ── Copy Strategy ────────────────────────────────────────────────────────────
+    
+    trade_multiplier: float = Field(
+        default=0.05,
+        ge=0.001,
+        le=1.0,
+        description="Multiplicateur de la taille du trade whale (0.05 = copie 5% - RECOMMANDÉ pour 5€ capital)",
+    )
+    
+    min_order_size_usd: float = Field(
+        default=1.0,
+        ge=1.0,
+        description="Taille minimum d'un ordre en USD (Polymarket minimum = $1)",
+    )
+    
+    max_position_size_usd: float = Field(
+        default=2.0,
+        ge=1.0,
+        description="Taille maximum d'une position en USD par market (2€ = 40% de 5€ capital)",
+    )
+    
+    # ── Safety Limits (Optimized for 5€ capital) ─────────────────────────────────
+    
+    max_daily_loss_usd: float = Field(
+        default=3.0,
+        ge=0.1,
+        description="Perte maximum par jour en USD (stop trading si atteint) - 3€ = 60% du capital",
+    )
+    
+    max_trades_per_day: int = Field(
+        default=3,
+        ge=1,
+        description="Nombre maximum de trades par jour (évite de bruler le capital en 1h)",
+    )
+    
+    max_trades_per_hour: int = Field(
+        default=1,
+        ge=1,
+        description="Nombre maximum de trades par heure (anti-spam whale)",
+    )
+    
+    retry_limit: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Nombre de tentatives maximum pour un ordre échoué",
+    )
+    
+    # ── Whale Filtering for Executor (STRICT for low capital) ───────────────────
+    
+    executor_min_whale_score: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Score minimum du whale pour copier (0.80 = top 20% seulement - STRICT)",
+    )
+    
+    executor_min_conviction: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Conviction minimum (redeem rate) pour copier (0.75 = high conviction only)",
+    )
+    
+    executor_min_whale_trade_size: float = Field(
+        default=1000.0,
+        ge=10.0,
+        description="Taille minimum du trade whale en USD (1000€ whale = signal sérieux)",
+    )
+    
+    executor_check_interval_sec: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="Fréquence de vérification des trades pending (secondes)",
+    )
+
     # ── Helpers ───────────────────────────────────────────────────────────────────
 
     def get_whitelist(self) -> set[str]:
