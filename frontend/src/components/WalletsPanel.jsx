@@ -1,10 +1,15 @@
 import ScrollReveal from './ScrollReveal'
+import { ExternalLink } from 'lucide-react'
 
 const WalletsPanel = ({ wallets }) => {
   const topWallets = wallets.slice(0, 12)
   const avgScore = wallets.length > 0 
     ? (wallets.reduce((sum, w) => sum + w.score, 0) / wallets.length * 100).toFixed(0)
     : '0'
+
+  const handleWalletClick = (address) => {
+    window.open(`https://polymarket.com/profile/${address}`, '_blank')
+  }
 
   return (
     <ScrollReveal>
@@ -38,18 +43,23 @@ const WalletsPanel = ({ wallets }) => {
               {topWallets.map((wallet, idx) => (
                 <div 
                   key={idx} 
+                  onClick={() => handleWalletClick(wallet.address)}
                   className="
                     border-sharp p-8 
                     transition-border hover-border-brand hover-border-thick hover-scale
-                    animate-slide-in
+                    animate-slide-in cursor-pointer group
                   "
                   style={{ animationDelay: `${idx * 0.05}s` }}
                 >
-                  {/* Address */}
-                  <div className="mb-6">
+                  {/* Address with icon */}
+                  <div className="mb-6 flex items-center justify-between">
                     <p className="font-mono text-xs text-ink">
                       {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
                     </p>
+                    <ExternalLink 
+                      size={14} 
+                      className="text-muted group-hover:text-brand transition-sharp" 
+                    />
                   </div>
 
                   {/* Score - BIG */}
