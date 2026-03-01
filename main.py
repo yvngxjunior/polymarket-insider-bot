@@ -1,9 +1,9 @@
 """
-PolyInsider Bot v3.3
-=====================
+PolyInsider Bot v3.3 (PHASE 2)
+===============================
 Architecture 7 phases + 5 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
-  1.5 Whale Exit Monitor — track REDEEM/SELL from whales [NEW v3.3]
+  1.5 Whale Exit Monitor — track REDEEM/SELL from whales [v3.3]
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
@@ -11,16 +11,23 @@ Architecture 7 phases + 5 background tasks:
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
   7. Performance report — win rate / PnL / trades          [périodique]
   └ WalletRefresher    — refresh + discovery wallets      [background, 60min]
+                         PHASE 2: + ActivityAnalyzer for enhanced scoring
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
   └ FeaturesManager    — Trailing SL + Auto Discovery      [background]
-  └ WhaleExitMonitor   — track whale exits + alerts       [background, 5min] [NEW v3.3]
+  └ WhaleExitMonitor   — track whale exits + alerts       [background, 5min] [v3.3]
 
 v3.3 NEW FEATURES:
   ✨ WHALE EXIT TRACKING — Monitor when whales REDEEM/SELL positions
      - Passive: Analyze exit patterns for conviction scoring
      - Active: Alert when whale exits a market you hold
      - Optional: Auto-exit on whale SELL signal (risky, disabled by default)
+
+PHASE 2 NEW FEATURES:
+  ✨ COMPLETE /activity API — Capture ALL event types (TRADE, REDEEM, SPLIT, MERGE)
+  ✨ ACCURATE WIN RATES — Calculate true win rates using REDEEM events
+  ✨ CONVICTION SCORING — Enrich whale scores based on exit behavior patterns
+  ✨ ENTRY TIMING — Score wallets on early vs late market entry
 
 v3.2 features:
   ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
@@ -57,7 +64,8 @@ from bot.database import get_db, TrackedWallet, init_db
 from bot.trading.polymarket import PolymarketDataClient
 from bot.scanner.insider import InsiderScanner, _safe_float
 from bot.scanner.whale import WhaleTracker
-from bot.scanner.whale_exit_monitor import WhaleExitMonitor  # NEW v3.3
+from bot.scanner.whale_exit_monitor import WhaleExitMonitor
+from bot.scanner.activity_analyzer import ActivityAnalyzer  # PHASE 2
 from bot.scanner.wallet_refresher import WalletRefresher
 from bot.scanner.wallet_scanner import WalletScanner
 from bot.scanner.convergence import ConvergenceDetector
@@ -463,7 +471,7 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v3.3")
+    logger.info("  PolyInsider Bot v3.3 (PHASE 2)")
     logger.info("  Copy · Whale · WhaleExit · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
@@ -480,7 +488,7 @@ async def run() -> None:
     logger.info("  ✨ Trailing Stop-Loss:     ON 📈 (activates @ +15% gain)")
     logger.info("  ✨ Auto Wallet Discovery:  ON 🔍 (every 24h)")
     logger.info("  ✨ Auto-Refresh on Whale:  ON ⚡ (immediate scanner update)")
-    # NEW v3.3
+    # v3.3
     if settings.whale_exit_tracking:
         logger.info(f"  ✨ Whale Exit Tracking:    ON 🚪 (window={settings.whale_exit_window_hours}h)")
         if settings.whale_exit_alert:
@@ -489,6 +497,9 @@ async def run() -> None:
             logger.info("     └─ Auto-Exit: Config enabled but NOT IMPLEMENTED (too risky)")
     else:
         logger.info("  Whale Exit Tracking:      OFF")
+    # PHASE 2
+    logger.info("  ✨ Activity Analytics:     ON 📊 (accurate win rates via REDEEM)")
+    logger.info("  ✨ Conviction Scoring:     ON 🎯 (whale exit pattern analysis)")
     
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
@@ -508,7 +519,8 @@ async def run() -> None:
     engine               = TradingEngine(risk_manager=risk_manager)
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
-    whale_exit_monitor   = WhaleExitMonitor(client=client)  # NEW v3.3
+    whale_exit_monitor   = WhaleExitMonitor(client=client)
+    activity_analyzer    = ActivityAnalyzer(client=client)  # PHASE 2
     convergence_detector = ConvergenceDetector(client=client)
     arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner       = MarketScanner(max_concurrent=8)
@@ -543,11 +555,15 @@ async def run() -> None:
         client=client,
         insider_scanner=scanner,
     )
+    
+    # PHASE 2: Inject ActivityAnalyzer and WhaleExitMonitor
     refresher = WalletRefresher(
         scanner=scanner,
         notifier=notifier,
         interval_minutes=60,
         wallet_scanner=wallet_scanner,
+        activity_analyzer=activity_analyzer,  # PHASE 2
+        whale_exit_monitor=whale_exit_monitor,  # PHASE 2
     )
     
     features_manager = get_features_manager(
@@ -580,7 +596,7 @@ async def run() -> None:
 
     llm_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
-    # NEW v3.3: Start whale exit monitor background task
+    # v3.3: Start whale exit monitor background task
     whale_exit_task = None
     if settings.whale_exit_tracking:
         whale_exit_task = asyncio.create_task(
