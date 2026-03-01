@@ -1,8 +1,9 @@
 """
-PolyInsider Bot v3.2
+PolyInsider Bot v3.3
 =====================
-Architecture 7 phases + 4 background tasks:
+Architecture 7 phases + 5 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
+  1.5 Whale Exit Monitor — track REDEEM/SELL from whales [NEW v3.3]
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
@@ -12,39 +13,38 @@ Architecture 7 phases + 4 background tasks:
   └ WalletRefresher    — refresh + discovery wallets      [background, 60min]
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
-  └ FeaturesManager    — Trailing SL + Auto Discovery      [background, NEW]
+  └ FeaturesManager    — Trailing SL + Auto Discovery      [background]
+  └ WhaleExitMonitor   — track whale exits + alerts       [background, 5min] [NEW v3.3]
 
-v3.2 NEW FEATURES:
+v3.3 NEW FEATURES:
+  ✨ WHALE EXIT TRACKING — Monitor when whales REDEEM/SELL positions
+     - Passive: Analyze exit patterns for conviction scoring
+     - Active: Alert when whale exits a market you hold
+     - Optional: Auto-exit on whale SELL signal (risky, disabled by default)
+
+v3.2 features:
   ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
   ✨ AUTO WALLET DISCOVERY — Scrapes Polymarket leaderboard every 24h
   ✨ AUTO-REFRESH AFTER WHALE ADD — Immediate scanner refresh when whales auto-added
 
-v2.8 fixes:
+v2.8-3.2 fixes:
   - FIX MAIN-2/3   float(None) crash + refresher.stop() manquant
   - FIX CMD-1      settings mutation Pydantic v2
   - FIX INSIDER-4  get_new_trades() timeout par wallet
   - IMPROV-8       process_new_trade enveloppé dans try/except
-
-v2.9 fixes:
   - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
   - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
   - FIX RISK-6     INSERT portfolio_snapshot jamais committé
   - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
   - FIX FILTER-1   rate-limit query status case-sensitive
-
-v3.0 fixes (audit lot 1):
   - FIX MAIN-4     performance_tracker.record_trade bare except → logger.warning
   - FIX MAIN-5     convergence.process_trade logger.debug → logger.warning
   - FIX MAIN-6     _open_positions accès privé → open_positions_count() public
   - FIX MAIN-7     aiohttp.ClientSession LLM recréé chaque cycle → session unique
-
-v3.1 fixes (pré-SaaS):
-  - FIX ENGINE-9   _http_session partagée dans TradingEngine (plus de new session/appel)
-  - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL (IF NOT EXISTS)
+  - FIX ENGINE-9   _http_session partagée dans TradingEngine
+  - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL
   - FIX MAIN-8     engine.close() dans asyncio.gather shutdown
-  
-v3.2 fixes:
-  - FIX MAIN-9     Auto-refresh scanner after whale auto-add (immediate copy)
+  - FIX MAIN-9     Auto-refresh scanner after whale auto-add
 """
 import asyncio
 import signal
@@ -57,6 +57,7 @@ from bot.database import get_db, TrackedWallet, init_db
 from bot.trading.polymarket import PolymarketDataClient
 from bot.scanner.insider import InsiderScanner, _safe_float
 from bot.scanner.whale import WhaleTracker
+from bot.scanner.whale_exit_monitor import WhaleExitMonitor  # NEW v3.3
 from bot.scanner.wallet_refresher import WalletRefresher
 from bot.scanner.wallet_scanner import WalletScanner
 from bot.scanner.convergence import ConvergenceDetector
@@ -74,8 +75,6 @@ from bot.notifications.health import HealthMonitor
 from bot.analytics.performance import PerformanceTracker
 from bot.ai.llm_agent import LLMAgent
 from bot.utils.logger import logger
-
-# NEW v3.2: Import features manager
 from bot.features_integration import get_features_manager
 
 settings = get_settings()
@@ -147,7 +146,6 @@ async def process_new_trade(
                     "avg_price":    conv_signal.avg_price,
                 })
         except Exception as e:
-            # FIX MAIN-5: warning au lieu de debug — composant critique
             logger.warning(f"[CONV] process_trade error: {e}")
 
     f = conv_filter.evaluate(
@@ -205,12 +203,91 @@ async def process_new_trade(
             )
         except Exception as e:
             logger.debug(f"[POS] register error: {e}")
-        # FIX MAIN-4: bare except → logger.warning pour tracer les échecs
         try:
             await performance_tracker.record_trade(copied_trade)
         except Exception as e:
             logger.warning(f"[PERF] record_trade failed: {e}")
         await notifier.notify_trade(copied_trade, market_question=question)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+async def whale_exit_monitor_loop(
+    whale_exit_monitor: WhaleExitMonitor,
+    notifier: TelegramNotifier,
+    exit_manager: ExitManager,
+    check_interval_sec: int = 300,  # 5 minutes
+) -> None:
+    """Background task to monitor whale exits.
+    
+    Checks tracked whales for REDEEM/SELL events every 5 minutes.
+    Sends alerts when whales exit markets we're holding.
+    """
+    logger.info(f"[WHALE_EXIT] Monitor started — check every {check_interval_sec}s")
+    
+    while True:
+        try:
+            await asyncio.sleep(check_interval_sec)
+            
+            if not settings.whale_exit_tracking:
+                continue
+            
+            # Get tracked whale addresses
+            with get_db() as db:
+                whales = db.query(TrackedWallet).filter(
+                    TrackedWallet.is_whale == True,
+                    TrackedWallet.is_active == True,
+                ).all()
+                
+                whale_addresses = [w.address for w in whales]
+            
+            if not whale_addresses:
+                continue
+            
+            # Check for exits in the last N hours
+            exit_events = await whale_exit_monitor.check_whale_exits(
+                whale_addresses=whale_addresses,
+                since_hours=settings.whale_exit_window_hours,
+            )
+            
+            if not exit_events:
+                continue
+            
+            # Process exits
+            for event in exit_events:
+                # Log all exits
+                logger.info(
+                    f"[WHALE_EXIT] {event.wallet[:10]}... "
+                    f"{event.exit_type} ${event.amount_usdc:,.0f} @ {event.price:.2f} | "
+                    f"{event.title[:45]}"
+                )
+                
+                # Alert if whale exited a market we hold
+                if event.matches_our_position and settings.whale_exit_alert:
+                    await notifier.send(
+                        f"🚨 <b>WHALE EXIT ALERT</b>\n\n"
+                        f"Whale <code>{event.wallet[:10]}...</code> "
+                        f"just {event.exit_type.lower()}ed a position you hold:\n\n"
+                        f"<b>{event.title}</b>\n\n"
+                        f"Exit type: <b>{event.exit_type}</b>\n"
+                        f"Price: <code>{event.price:.2f}</code>\n"
+                        f"Amount: <code>${event.amount_usdc:,.0f}</code>\n\n"
+                        f"💡 Consider exiting this position."
+                    )
+                    
+                    # Optional: Auto-exit (DANGEROUS - disabled by default)
+                    if settings.whale_auto_exit and event.position_id:
+                        logger.warning(
+                            f"[WHALE_EXIT] ⚠️ Auto-exit triggered for position #{event.position_id}"
+                        )
+                        await exit_manager.force_close_position(
+                            position_id=event.position_id,
+                            reason="whale_exit_signal",
+                        )
+        
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[WHALE_EXIT] Monitor loop error: {e}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -230,9 +307,7 @@ async def main_loop(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
     health_monitor: HealthMonitor,
-    # FIX MAIN-7: session aiohttp LLM créée une seule fois, injectée ici
     llm_session: aiohttp.ClientSession,
-    # FIX MAIN-9: refresher for auto-trigger
     refresher: WalletRefresher,
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
@@ -250,7 +325,6 @@ async def main_loop(
             health_monitor.record_activity()
 
             # Phase 1 — Whale scan (throttlé: toutes les WHALE_EVERY boucles)
-            # FIX MAIN-9: Check if new wallets were auto-added
             if loop_count % WHALE_EVERY == 0:
                 for event in await whale_tracker.scan():
                     await notifier.notify_whale_event(
@@ -346,7 +420,6 @@ async def main_loop(
                     )
 
             # Phase 6 — LLM analysis
-            # FIX MAIN-7: réutilise llm_session (créée une fois dans run())
             if loop_count % LLM_EVERY == 0 and llm_agent.is_enabled():
                 try:
                     async with llm_session.get(
@@ -371,7 +444,6 @@ async def main_loop(
                     logger.debug(f"[LLM] Scan cycle error: {e}")
 
             # Phase 7 — Performance report
-            # FIX MAIN-6: open_positions_count() public au lieu de _open_positions privé
             if loop_count % PERF_EVERY == 0:
                 try:
                     stats = await performance_tracker.get_summary()
@@ -395,8 +467,8 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v3.2")
-    logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
+    logger.info("  PolyInsider Bot v3.3")
+    logger.info("  Copy · Whale · WhaleExit · Conv · Arb · Scanner · LLM · ExitMgr")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
     logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
@@ -408,10 +480,20 @@ async def run() -> None:
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
     logger.info("  Convergence boost (x1.5): ON 🔥")
-    # NEW v3.2
+    # v3.2
     logger.info("  ✨ Trailing Stop-Loss:     ON 📈 (activates @ +15% gain)")
     logger.info("  ✨ Auto Wallet Discovery:  ON 🔍 (every 24h)")
     logger.info("  ✨ Auto-Refresh on Whale:  ON ⚡ (immediate scanner update)")
+    # NEW v3.3
+    if settings.whale_exit_tracking:
+        logger.info(f"  ✨ Whale Exit Tracking:    ON 🚪 (window={settings.whale_exit_window_hours}h)")
+        if settings.whale_exit_alert:
+            logger.info("     └─ Exit Alerts: ENABLED 🔔")
+        if settings.whale_auto_exit:
+            logger.info("     └─ Auto-Exit: ENABLED ⚠️ (RISKY!)")
+    else:
+        logger.info("  Whale Exit Tracking:      OFF")
+    
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -430,6 +512,7 @@ async def run() -> None:
     engine               = TradingEngine(risk_manager=risk_manager)
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
+    whale_exit_monitor   = WhaleExitMonitor(client=client)  # NEW v3.3
     convergence_detector = ConvergenceDetector(client=client)
     arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner       = MarketScanner(max_concurrent=8)
@@ -471,7 +554,6 @@ async def run() -> None:
         wallet_scanner=wallet_scanner,
     )
     
-    # NEW v3.2: Initialize features manager (Trailing SL + Auto Discovery)
     features_manager = get_features_manager(
         enable_trailing_sl=True,
         enable_wallet_discovery=True,
@@ -493,15 +575,26 @@ async def run() -> None:
     await refresher.start()
     await exit_manager.start()
     await health_monitor.start()
-    await features_manager.start()  # NEW v3.2: Start Trailing SL + Discovery
+    await features_manager.start()
     
     try:
         await cmd_handler.start_polling()
     except Exception as e:
         logger.warning(f"[COMMANDS] Could not start polling (token invalid?): {e}")
 
-    # FIX MAIN-7: session aiohttp LLM créée une fois ici, partagée sur toute la durée de vie
     llm_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+
+    # NEW v3.3: Start whale exit monitor background task
+    whale_exit_task = None
+    if settings.whale_exit_tracking:
+        whale_exit_task = asyncio.create_task(
+            whale_exit_monitor_loop(
+                whale_exit_monitor=whale_exit_monitor,
+                notifier=notifier,
+                exit_manager=exit_manager,
+                check_interval_sec=300,  # 5 minutes
+            )
+        )
 
     main_task = asyncio.create_task(
         main_loop(
@@ -514,23 +607,31 @@ async def run() -> None:
             conv_filter=conv_filter, sizer=sizer,
             health_monitor=health_monitor,
             llm_session=llm_session,
-            refresher=refresher,  # FIX MAIN-9: Pass refresher
+            refresher=refresher,
         )
     )
 
     await stop_event.wait()
     main_task.cancel()
+    if whale_exit_task:
+        whale_exit_task.cancel()
+    
     try:
         await main_task
     except asyncio.CancelledError:
         pass
+    
+    if whale_exit_task:
+        try:
+            await whale_exit_task
+        except asyncio.CancelledError:
+            pass
 
-    # FIX MAIN-8: engine.close() ajouté pour fermer la session HTTP partagée
     await asyncio.gather(
         refresher.stop(),
         exit_manager.stop(),
         health_monitor.stop(),
-        features_manager.stop(),  # NEW v3.2: Stop features manager
+        features_manager.stop(),
         cmd_handler.stop(),
         client.close(),
         engine.close(),
