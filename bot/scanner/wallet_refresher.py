@@ -24,6 +24,9 @@ FIX REFRESHER-1 — _known_wallets chargé depuis DB au __init__.
 FIX REFRESHER-2 — Discovery immédiat si DB vide au démarrage.
   Avant: avec DB vide, discovery attendait le cycle 3 (3h).
   Après: si Refresh #1 trouve 0 wallets actifs, discovery est lancé immédiatement.
+  
+FIX REFRESHER-3 — Public trigger_refresh() for external triggers
+  Permet de forcer un refresh immédiat depuis main loop (ex: après auto-add whale).
 """
 from __future__ import annotations
 
@@ -63,6 +66,7 @@ class WalletRefresher:
         self._refresh_count: int = 0
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._refresh_pending = False  # NEW: Flag for external triggers
 
         # FIX REFRESHER-1: charge les wallets connus depuis la DB au demarrage
         self._known_wallets: set[str] = self._load_known_wallets()
@@ -107,6 +111,18 @@ class WalletRefresher:
             return 0
 
     # ------------------------------------------------------------------
+    # FIX REFRESHER-3 — Public trigger for external refresh
+    # ------------------------------------------------------------------
+    
+    def trigger_refresh(self) -> None:
+        """
+        Request an immediate refresh on the next loop iteration.
+        Thread-safe, can be called from main loop.
+        """
+        self._refresh_pending = True
+        logger.debug("[REFRESHER] External refresh trigger set")
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -149,10 +165,14 @@ class WalletRefresher:
 
         while not self._stop_event.is_set():
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.interval_minutes * 60,
-                )
+                # Check for pending refresh every second
+                for _ in range(self.interval_minutes * 60):
+                    if self._refresh_pending:
+                        self._refresh_pending = False
+                        break
+                    await asyncio.sleep(1)
+                    if self._stop_event.is_set():
+                        break
             except asyncio.TimeoutError:
                 pass
 

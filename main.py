@@ -17,6 +17,7 @@ Architecture 7 phases + 4 background tasks:
 v3.2 NEW FEATURES:
   ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
   ✨ AUTO WALLET DISCOVERY — Scrapes Polymarket leaderboard every 24h
+  ✨ AUTO-REFRESH AFTER WHALE ADD — Immediate scanner refresh when whales auto-added
 
 v2.8 fixes:
   - FIX MAIN-2/3   float(None) crash + refresher.stop() manquant
@@ -41,6 +42,9 @@ v3.1 fixes (pré-SaaS):
   - FIX ENGINE-9   _http_session partagée dans TradingEngine (plus de new session/appel)
   - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL (IF NOT EXISTS)
   - FIX MAIN-8     engine.close() dans asyncio.gather shutdown
+  
+v3.2 fixes:
+  - FIX MAIN-9     Auto-refresh scanner after whale auto-add (immediate copy)
 """
 import asyncio
 import signal
@@ -228,6 +232,8 @@ async def main_loop(
     health_monitor: HealthMonitor,
     # FIX MAIN-7: session aiohttp LLM créée une seule fois, injectée ici
     llm_session: aiohttp.ClientSession,
+    # FIX MAIN-9: refresher for auto-trigger
+    refresher: WalletRefresher,
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
@@ -244,6 +250,7 @@ async def main_loop(
             health_monitor.record_activity()
 
             # Phase 1 — Whale scan (throttlé: toutes les WHALE_EVERY boucles)
+            # FIX MAIN-9: Check if new wallets were auto-added
             if loop_count % WHALE_EVERY == 0:
                 for event in await whale_tracker.scan():
                     await notifier.notify_whale_event(
@@ -253,6 +260,14 @@ async def main_loop(
                         side=event["side"],
                         price=event["price"],
                     )
+                
+                # FIX MAIN-9: Trigger immediate refresh if wallets were auto-added
+                if whale_tracker.last_added_count > 0:
+                    logger.info(
+                        f"[MAIN] {whale_tracker.last_added_count} new whales auto-added — "
+                        f"triggering scanner refresh..."
+                    )
+                    refresher.trigger_refresh()
 
             # Phase 2+3 — Insider copy trading + convergence par trade
             with get_db() as db:
@@ -396,6 +411,7 @@ async def run() -> None:
     # NEW v3.2
     logger.info("  ✨ Trailing Stop-Loss:     ON 📈 (activates @ +15% gain)")
     logger.info("  ✨ Auto Wallet Discovery:  ON 🔍 (every 24h)")
+    logger.info("  ✨ Auto-Refresh on Whale:  ON ⚡ (immediate scanner update)")
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -498,6 +514,7 @@ async def run() -> None:
             conv_filter=conv_filter, sizer=sizer,
             health_monitor=health_monitor,
             llm_session=llm_session,
+            refresher=refresher,  # FIX MAIN-9: Pass refresher
         )
     )
 
