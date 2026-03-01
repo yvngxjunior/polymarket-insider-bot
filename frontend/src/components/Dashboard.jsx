@@ -17,15 +17,29 @@ const Dashboard = ({ stats }) => {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [portfolioData, trailingData, walletsData] = await Promise.all([
+        const [portfolioData, trailingData, walletsData, settingsData, trailingConfig] = await Promise.all([
           fetchAPI('/portfolio'),
           fetchAPI('/features/trailing-sl/status'),
           fetchAPI('/wallets'),
+          fetchAPI('/settings'),
+          fetchAPI('/features/trailing-sl/config'),
         ])
         
         setPortfolio(portfolioData)
         setTrailingPositions(trailingData.positions || [])
         setWallets(walletsData.active_wallets || [])
+        
+        // Merge settings into config
+        setConfig({
+          dry_run: settingsData.dry_run || false,
+          max_trade_amount: settingsData.max_trade_amount || 100,
+          min_win_rate: settingsData.min_win_rate || 0.60,
+          min_wallet_score: 0.70,
+          trailing_sl_enabled: true,
+          trailing_sl_activation: trailingConfig.activation_gain_pct || 0.15,
+          trailing_sl_distance: trailingConfig.trail_distance_pct || 0.05,
+          wallet_discovery_enabled: true,
+        })
       } catch (error) {
         console.error('Failed to load dashboard data:', error)
       }
@@ -38,17 +52,30 @@ const Dashboard = ({ stats }) => {
 
   const handleSaveConfig = async (newConfig) => {
     try {
+      // Update bot settings (dry_run, max_trade_amount, etc.)
+      await fetchAPI('/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          dry_run: newConfig.dry_run,
+          max_trade_amount: newConfig.max_trade_amount,
+          min_win_rate: newConfig.min_win_rate,
+        }),
+      })
+      
       // Update trailing SL config
       await fetchAPI('/features/trailing-sl/config', {
         method: 'POST',
         body: JSON.stringify({
-          enabled: newConfig.trailing_sl_enabled,
-          activation_threshold: newConfig.trailing_sl_activation,
-          trailing_distance: newConfig.trailing_sl_distance,
+          activation_gain_pct: newConfig.trailing_sl_activation,
+          trail_distance_pct: newConfig.trailing_sl_distance,
+          min_locked_profit_pct: 0.10, // default
         }),
       })
       
       console.log('Configuration saved:', newConfig)
+      // Update local config state
+      setConfig(newConfig)
+      
       // TODO: Add success toast notification
     } catch (error) {
       console.error('Failed to save config:', error)
@@ -83,6 +110,15 @@ const Dashboard = ({ stats }) => {
             Settings
           </button>
         </div>
+
+        {/* Dry Run Banner */}
+        {config?.dry_run && (
+          <div className="mt-6 p-4 border-brand bg-brand/5 animate-pulse">
+            <p className="font-mono text-sm text-brand uppercase tracking-wider text-center">
+              🧪 DRY RUN MODE ACTIVE — No real trades executed
+            </p>
+          </div>
+        )}
       </header>
 
       {/* Metrics - Grid System */}
