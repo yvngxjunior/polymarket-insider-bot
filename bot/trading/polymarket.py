@@ -184,6 +184,9 @@ class PolymarketDataClient:
             
         Returns:
             List of activity events (all users) on this market
+            
+        FIX: Changed param from 'market' to 'conditionId' to fix 400 error.
+        The API expects 'conditionId' not 'market' for filtering by market.
         """
         limit = max(1, min(int(limit), 500))
         offset = max(0, min(int(offset), 1000))
@@ -192,7 +195,7 @@ class PolymarketDataClient:
             resp = await self._data_client.get(
                 "/activity",
                 params={
-                    "market": condition_id,
+                    "conditionId": condition_id,  # FIX: was "market", now "conditionId"
                     "limit": limit,
                     "offset": offset,
                     "sortBy": "TIMESTAMP",
