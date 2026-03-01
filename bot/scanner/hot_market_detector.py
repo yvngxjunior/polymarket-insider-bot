@@ -179,7 +179,8 @@ class HotMarketDetector:
                 if not condition_id:
                     continue
                 
-                user = event.get("user", "").lower()
+                user = event.get("user", "") or event.get("proxyWallet", "")
+                user = user.lower()
                 side = event.get("side", "").upper()
                 usdc_size = float(event.get("usdcSize", 0))
                 
@@ -354,92 +355,11 @@ class HotMarketDetector:
     ) -> Optional[dict]:
         """Get detailed momentum analysis for a specific market.
         
+        Note: This method is currently not used in main detection logic
+              to avoid API rate limits. Kept for future enhancements.
+        
         Returns:
             Dict with volume_trend, price_trend, whale_activity
         """
-        try:
-            activity = await self.client.get_market_activity(
-                condition_id=condition_id,
-                limit=500,
-            )
-            
-            if not activity:
-                return None
-            
-            cutoff = datetime.now() - timedelta(hours=hours)
-            
-            # Get tracked whales
-            with get_db() as db:
-                whales = db.query(TrackedWallet).filter(
-                    TrackedWallet.is_whale == True,
-                    TrackedWallet.is_active == True,
-                ).all()
-                whale_addresses = {w.address.lower() for w in whales}
-            
-            # Analyze trades
-            hourly_volume = defaultdict(float)
-            hourly_whale_trades = defaultdict(int)
-            prices = []
-            
-            for event in activity:
-                event_type = event.get("type", "").upper()
-                if event_type != "TRADE":
-                    continue
-                
-                ts_raw = event.get("timestamp")
-                if not ts_raw:
-                    continue
-                
-                try:
-                    if isinstance(ts_raw, (int, float)):
-                        ts = datetime.fromtimestamp(ts_raw)
-                    else:
-                        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                    
-                    if ts < cutoff:
-                        continue
-                except Exception:
-                    continue
-                
-                hour_key = ts.strftime("%Y-%m-%d %H:00")
-                usdc_size = float(event.get("usdcSize", 0))
-                price = float(event.get("price", 0))
-                user = event.get("user", "").lower()
-                
-                hourly_volume[hour_key] += usdc_size
-                
-                if user in whale_addresses:
-                    hourly_whale_trades[hour_key] += 1
-                
-                if price > 0:
-                    prices.append({"timestamp": ts, "price": price})
-            
-            # Calculate trends
-            volume_values = list(hourly_volume.values())
-            volume_trend = "INCREASING" if len(volume_values) >= 2 and volume_values[-1] > volume_values[0] else "STABLE"
-            
-            price_trend = "STABLE"
-            if len(prices) >= 2:
-                first_price = prices[0]["price"]
-                last_price = prices[-1]["price"]
-                change_pct = ((last_price - first_price) / first_price * 100) if first_price > 0 else 0
-                
-                if change_pct > 5:
-                    price_trend = "UP"
-                elif change_pct < -5:
-                    price_trend = "DOWN"
-            
-            whale_activity = "HIGH" if sum(hourly_whale_trades.values()) >= 10 else "NORMAL"
-            
-            return {
-                "volume_trend": volume_trend,
-                "price_trend": price_trend,
-                "whale_activity": whale_activity,
-                "total_volume": sum(volume_values),
-                "whale_trades": sum(hourly_whale_trades.values()),
-                "hourly_volume": dict(hourly_volume),
-            }
-        
-        except Exception as e:
-            logger.warning(f"[HOT_MARKET] Momentum analysis failed for {condition_id}: {e}")
-            return None
+        logger.debug(f"[HOT_MARKET] get_market_momentum not implemented (would cause API 400 for condition_id={condition_id[:20]})")
+        return None
