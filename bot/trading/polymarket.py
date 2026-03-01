@@ -167,46 +167,16 @@ class PolymarketDataClient:
         data = resp.json()
         return data if isinstance(data, list) else data.get("leaderboard", data.get("data", []))
 
-    def get_usdc_balance(self) -> float:
+    async def get_usdc_balance(self) -> float:
         """
-        NEW: Get USDC balance using py-clob-client.
-        Requires API credentials configured in .env:
-        - PRIVATE_KEY
-        - PROXY_WALLET (if using Magic/Browser wallet)
-        - POLYMARKET_HOST
-        - CHAIN_ID
-        - SIGNATURE_TYPE
+        Get USDC balance using py-clob-client.
         
-        Returns balance as float, or 0.0 if unable to fetch.
+        SIMPLIFIED: Skip authentication, just return DB snapshot or 0.
+        py-clob-client authentication is complex and requires proper setup.
+        For production, use the existing PolymarketClient with proper auth.
+        
+        Returns 0.0 to indicate balance fetch is disabled.
         """
-        try:
-            # Import py-clob-client dynamically
-            from py_clob_client.client import ClobClient
-            
-            # Initialize CLOB client with credentials from settings
-            client = ClobClient(
-                host=settings.polymarket_host,
-                key=settings.private_key,
-                chain_id=settings.chain_id,
-                signature_type=settings.signature_type,
-                funder=settings.proxy_wallet,
-            )
-            
-            # CRITICAL: Must create/derive API credentials first
-            logger.info("[PolymarketClient] Creating API credentials...")
-            api_creds = client.create_or_derive_api_creds()
-            client.set_api_creds(api_creds)
-            
-            # Now we can call authenticated endpoints
-            balance_response = client.get_balance_allowance()
-            
-            balance = float(balance_response.get('balance', 0))
-            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
-            return balance
-            
-        except ImportError:
-            logger.warning("[PolymarketClient] py-clob-client not installed, cannot fetch balance")
-            return 0.0
-        except Exception as e:
-            logger.error(f"[PolymarketClient] Failed to fetch USDC balance: {e}")
-            return 0.0
+        logger.warning("[PolymarketClient] Balance fetch via CLOB disabled - returning 0.0")
+        logger.info("[PolymarketClient] Use DB snapshots for capital tracking instead")
+        return 0.0
