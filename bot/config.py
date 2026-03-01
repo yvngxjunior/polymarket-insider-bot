@@ -44,11 +44,24 @@ class Settings(BaseSettings):
 
     # ── Polymarket ─────────────────────────────────────────────────────────────────
     polymarket_host: str = "https://clob.polymarket.com"
+    polymarket_clob_host: str = Field(default="https://clob.polymarket.com", description="Alias for polymarket_host")
     polymarket_gamma_host: str = "https://gamma-api.polymarket.com"
     polymarket_data_host: str = "https://data-api.polymarket.com"
     private_key: str
     proxy_wallet: str
     chain_id: int = 137
+    signature_type: int = Field(default=0, description="Signature type (0=EOA, 1=EIP712, 2=POLY_PROXY)")
+    
+    # Polymarket Builder API Keys (used by py-clob-client)
+    poly_builder_api_key: Optional[str] = Field(default=None, description="Polymarket Builder API Key")
+    poly_builder_secret: Optional[str] = Field(default=None, description="Polymarket Builder API Secret")
+    poly_builder_passphrase: Optional[str] = Field(default=None, description="Polymarket Builder API Passphrase")
+    
+    # HTTP Proxy for geo-restricted regions (France, etc.)
+    http_proxy: Optional[str] = Field(
+        default=None,
+        description="HTTP/HTTPS proxy URL (ex: http://proxy.example.com:8080 or socks5://127.0.0.1:1080)"
+    )
 
     # ── Telegram ─────────────────────────────────────────────────────────────────
     telegram_bot_token: str
@@ -68,7 +81,7 @@ class Settings(BaseSettings):
     scan_interval: int = Field(default=3, ge=1, le=60)
     max_trade_amount: float = Field(default=50.0, ge=1.0)
     min_win_rate: float = Field(default=0.70, ge=0.0, le=1.0)
-    min_trades_count: int = Field(default=15, ge=1)
+    min_trades_count: int = Field(default=15, ge=0, description="Allow 0 for leaderboard wallets without trade history in DB")
     whale_threshold: float = Field(default=500.0, ge=50.0)
     dry_run: bool = True
 
@@ -150,6 +163,32 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Whale Exit Tracking (v3.3) ────────────────────────────────────────────────
+    whale_exit_tracking: bool = Field(
+        default=True,
+        description="Active le tracking des sorties (REDEEM/SELL) des whales"
+    )
+    whale_exit_alert: bool = Field(
+        default=True,
+        description="Envoie une alerte Telegram quand une whale sort d'un marché que tu détiens"
+    )
+    whale_auto_exit: bool = Field(
+        default=False,
+        description="⚠️ DANGER: Force la sortie automatique quand une whale vend (peut causer des pertes)"
+    )
+    whale_exit_window_hours: int = Field(
+        default=6,
+        ge=1,
+        le=72,
+        description="Fenêtre de temps (heures) pour tracker les exits après notre entrée"
+    )
+    whale_exit_min_score: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Score minimum de la whale pour déclencher une alerte exit (évite le bruit)"
+    )
+
     # ── Position Sizer Tiered (v2.7) ──────────────────────────────────────────────
     tiered_multipliers: str = Field(
         default="",
@@ -211,6 +250,97 @@ class Settings(BaseSettings):
     health_alert_cooldown_min: int = Field(
         default=60,
         description="Minutes minimum entre deux alertes de santé (anti-spam)",
+    )
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # ── AUTO-TRADING EXECUTOR (v3.4 - Inspired by dexorynlabs) ───────────────────
+    # ══════════════════════════════════════════════════════════════════════════════
+    
+    auto_trading_enabled: bool = Field(
+        default=False,
+        description="🚀 Active l'exécution automatique des trades (OFF par défaut pour sécurité)",
+    )
+    
+    executor_dry_run: bool = Field(
+        default=True,
+        description="🎭 Mode simulation : log les trades mais ne les exécute pas (recommandé pour tester)",
+    )
+    
+    # ── Copy Strategy ────────────────────────────────────────────────────────────
+    
+    trade_multiplier: float = Field(
+        default=0.05,
+        ge=0.001,
+        le=1.0,
+        description="Multiplicateur de la taille du trade whale (0.05 = copie 5% - RECOMMANDÉ pour 5€ capital)",
+    )
+    
+    min_order_size_usd: float = Field(
+        default=1.0,
+        ge=1.0,
+        description="Taille minimum d'un ordre en USD (Polymarket minimum = $1)",
+    )
+    
+    max_position_size_usd: float = Field(
+        default=2.0,
+        ge=1.0,
+        description="Taille maximum d'une position en USD par market (2€ = 40% de 5€ capital)",
+    )
+    
+    # ── Safety Limits (Optimized for 5€ capital) ─────────────────────────────────
+    
+    max_daily_loss_usd: float = Field(
+        default=3.0,
+        ge=0.1,
+        description="Perte maximum par jour en USD (stop trading si atteint) - 3€ = 60% du capital",
+    )
+    
+    max_trades_per_day: int = Field(
+        default=3,
+        ge=1,
+        description="Nombre maximum de trades par jour (évite de bruler le capital en 1h)",
+    )
+    
+    max_trades_per_hour: int = Field(
+        default=1,
+        ge=1,
+        description="Nombre maximum de trades par heure (anti-spam whale)",
+    )
+    
+    retry_limit: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Nombre de tentatives maximum pour un ordre échoué",
+    )
+    
+    # ── Whale Filtering for Executor (STRICT for low capital) ───────────────────
+    
+    executor_min_whale_score: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Score minimum du whale pour copier (0.80 = top 20% seulement - STRICT)",
+    )
+    
+    executor_min_conviction: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Conviction minimum (redeem rate) pour copier (0.75 = high conviction only)",
+    )
+    
+    executor_min_whale_trade_size: float = Field(
+        default=1000.0,
+        ge=10.0,
+        description="Taille minimum du trade whale en USD (1000€ whale = signal sérieux)",
+    )
+    
+    executor_check_interval_sec: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="Fréquence de vérification des trades pending (secondes)",
     )
 
     # ── Helpers ───────────────────────────────────────────────────────────────────

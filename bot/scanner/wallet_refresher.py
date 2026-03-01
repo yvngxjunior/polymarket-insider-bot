@@ -8,6 +8,7 @@ Effectue deux opérations distinctes:
      — Recalcule win_rate, score, consecutive_losses pour TOUS les wallets actifs
      — Met à jour TrackedWallet en DB (champ consecutive_losses inclus)
      — Alerte Telegram pour les nouveaux insiders détectés
+     PHASE 2: + ActivityAnalyzer pour entry_timing_score et win rate précis
 
   2. DISCOVERY (via WalletScanner.discover) — optionnel, toutes les N*discovery_ratio fois
      — Cherche de nouveaux insiders sur le leaderboard + gros trades
@@ -24,6 +25,14 @@ FIX REFRESHER-1 — _known_wallets chargé depuis DB au __init__.
 FIX REFRESHER-2 — Discovery immédiat si DB vide au démarrage.
   Avant: avec DB vide, discovery attendait le cycle 3 (3h).
   Après: si Refresh #1 trouve 0 wallets actifs, discovery est lancé immédiatement.
+  
+FIX REFRESHER-3 — Public trigger_refresh() for external triggers
+  Permet de forcer un refresh immédiat depuis main loop (ex: après auto-add whale).
+
+PHASE 2 — ActivityAnalyzer integration
+  - Calculate accurate win rates using REDEEM events
+  - Enrich whale scores with WhaleExitMonitor conviction scores
+  - Log enhanced analytics during refresh
 """
 from __future__ import annotations
 
@@ -31,6 +40,8 @@ import asyncio
 
 from bot.database import get_db, TrackedWallet
 from bot.scanner.insider import InsiderScanner
+from bot.scanner.activity_analyzer import ActivityAnalyzer  # PHASE 2
+from bot.scanner.whale_exit_monitor import WhaleExitMonitor  # PHASE 2
 from bot.notifications.telegram import TelegramNotifier
 from bot.utils.logger import logger
 
@@ -38,6 +49,7 @@ from bot.utils.logger import logger
 class WalletRefresher:
     """
     Background task: refresh + discovery des wallets insiders.
+    PHASE 2: Enhanced with ActivityAnalyzer for better scoring.
 
     Args:
         scanner:           InsiderScanner (analyse et refresh des wallets connus)
@@ -45,6 +57,8 @@ class WalletRefresher:
         interval_minutes:  fréquence du refresh en minutes (défaut: 60)
         discovery_ratio:   lance discovery tous les N refreshs (défaut: 3 = toutes les 3h)
         wallet_scanner:    WalletScanner optionnel (injecté ou créé lazy)
+        activity_analyzer: ActivityAnalyzer optionnel (PHASE 2)
+        whale_exit_monitor: WhaleExitMonitor optionnel (PHASE 2)
     """
 
     def __init__(
@@ -54,15 +68,20 @@ class WalletRefresher:
         interval_minutes: int = 60,
         discovery_ratio: int = 3,
         wallet_scanner=None,
+        activity_analyzer: ActivityAnalyzer | None = None,  # PHASE 2
+        whale_exit_monitor: WhaleExitMonitor | None = None,  # PHASE 2
     ) -> None:
         self.scanner = scanner
         self.notifier = notifier
         self.interval_minutes = interval_minutes
         self.discovery_ratio = discovery_ratio
         self._wallet_scanner = wallet_scanner
+        self._activity_analyzer = activity_analyzer  # PHASE 2
+        self._whale_exit_monitor = whale_exit_monitor  # PHASE 2
         self._refresh_count: int = 0
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._refresh_pending = False  # NEW: Flag for external triggers
 
         # FIX REFRESHER-1: charge les wallets connus depuis la DB au demarrage
         self._known_wallets: set[str] = self._load_known_wallets()
@@ -107,6 +126,18 @@ class WalletRefresher:
             return 0
 
     # ------------------------------------------------------------------
+    # FIX REFRESHER-3 — Public trigger for external refresh
+    # ------------------------------------------------------------------
+    
+    def trigger_refresh(self) -> None:
+        """
+        Request an immediate refresh on the next loop iteration.
+        Thread-safe, can be called from main loop.
+        """
+        self._refresh_pending = True
+        logger.debug("[REFRESHER] External refresh trigger set")
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -116,7 +147,8 @@ class WalletRefresher:
         self._task = asyncio.create_task(self._loop(), name="wallet_refresher")
         logger.info(
             f"[REFRESHER] Started — interval={self.interval_minutes}min "
-            f"discovery every {self.discovery_ratio} cycles"
+            f"discovery every {self.discovery_ratio} cycles | "
+            f"ActivityAnalyzer: {'ON' if self._activity_analyzer else 'OFF'}"
         )
 
     async def stop(self) -> None:
@@ -149,10 +181,14 @@ class WalletRefresher:
 
         while not self._stop_event.is_set():
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.interval_minutes * 60,
-                )
+                # Check for pending refresh every second
+                for _ in range(self.interval_minutes * 60):
+                    if self._refresh_pending:
+                        self._refresh_pending = False
+                        break
+                    await asyncio.sleep(1)
+                    if self._stop_event.is_set():
+                        break
             except asyncio.TimeoutError:
                 pass
 
@@ -165,7 +201,7 @@ class WalletRefresher:
                 await self._run_discovery()
 
     # ------------------------------------------------------------------
-    # Refresh: recalcule les stats de tous les wallets actifs
+    # PHASE 2: Enhanced refresh with ActivityAnalyzer
     # ------------------------------------------------------------------
 
     async def _run_refresh(self) -> None:
@@ -175,6 +211,14 @@ class WalletRefresher:
         try:
             analyses = await self.scanner.refresh_tracked_wallets()
             await self._sync_consecutive_losses(analyses)
+
+            # PHASE 2: Enrich scores with ActivityAnalyzer
+            if self._activity_analyzer:
+                await self._enrich_with_activity_analysis(analyses)
+            
+            # PHASE 2: Enrich whale scores with exit patterns
+            if self._whale_exit_monitor:
+                await self._enrich_whale_conviction_scores()
 
             new_count = 0
             for analysis in analyses:
@@ -198,6 +242,91 @@ class WalletRefresher:
 
         except Exception as e:
             logger.error(f"[REFRESHER] Refresh error: {e}")
+
+    async def _enrich_with_activity_analysis(self, analyses) -> None:
+        """PHASE 2: Calculate accurate win rates and update DB.
+        
+        For each wallet, calculate:
+        - Accurate win rate using REDEEM events
+        - Average hold time
+        - Total PnL estimate
+        
+        Updates TrackedWallet with better metrics.
+        """
+        try:
+            logger.info("[REFRESHER] Running ActivityAnalyzer enrichment...")
+            
+            enrichment_count = 0
+            for analysis in analyses:
+                try:
+                    # Calculate accurate win rate
+                    win_rate_result = await self._activity_analyzer.calculate_accurate_win_rate(
+                        wallet=analysis.address,
+                        lookback_days=30,
+                    )
+                    
+                    if win_rate_result and win_rate_result.total_markets >= 5:
+                        # Update DB with accurate metrics
+                        with get_db() as db:
+                            wallet = db.get(TrackedWallet, analysis.address)
+                            if wallet:
+                                # Only update if significantly different
+                                old_wr = wallet.win_rate or 0.5
+                                new_wr = win_rate_result.win_rate
+                                
+                                if abs(new_wr - old_wr) > 0.05:  # > 5% difference
+                                    wallet.win_rate = new_wr
+                                    wallet.total_trades = win_rate_result.total_markets
+                                    
+                                    logger.info(
+                                        f"[REFRESHER] 📊 {analysis.address[:10]}... | "
+                                        f"Win Rate: {old_wr:.1%} → {new_wr:.1%} (accurate via REDEEM) | "
+                                        f"Markets: {win_rate_result.winning_markets}W-{win_rate_result.losing_markets}L-{win_rate_result.ongoing_markets}O | "
+                                        f"Avg Hold: {win_rate_result.avg_hold_hours:.1f}h"
+                                    )
+                                    enrichment_count += 1
+                
+                except Exception as e:
+                    logger.debug(f"[REFRESHER] ActivityAnalyzer failed for {analysis.address[:10]}: {e}")
+            
+            if enrichment_count > 0:
+                logger.info(f"[REFRESHER] ActivityAnalyzer enriched {enrichment_count} wallets")
+        
+        except Exception as e:
+            logger.warning(f"[REFRESHER] ActivityAnalyzer enrichment error: {e}")
+
+    async def _enrich_whale_conviction_scores(self) -> None:
+        """PHASE 2: Update whale scores based on exit behavior patterns.
+        
+        Uses WhaleExitMonitor.enrich_whale_scores() to:
+        - Analyze REDEEM vs SELL patterns
+        - Calculate conviction scores
+        - Apply score adjustments (+0.05 for high conviction, -0.10 for low)
+        """
+        try:
+            logger.info("[REFRESHER] Running whale conviction score enrichment...")
+            
+            adjustments = await self._whale_exit_monitor.enrich_whale_scores()
+            
+            if adjustments:
+                with get_db() as db:
+                    for wallet_addr, adjustment in adjustments.items():
+                        wallet = db.get(TrackedWallet, wallet_addr)
+                        if wallet:
+                            old_score = wallet.score or 0.70
+                            new_score = max(0.0, min(1.0, old_score + adjustment))
+                            wallet.score = new_score
+                            
+                            logger.info(
+                                f"[REFRESHER] 🐳 {wallet_addr[:10]}... | "
+                                f"Score: {old_score:.2f} → {new_score:.2f} "
+                                f"({adjustment:+.2f} conviction adjustment)"
+                            )
+                
+                logger.info(f"[REFRESHER] Whale conviction enriched {len(adjustments)} whales")
+        
+        except Exception as e:
+            logger.warning(f"[REFRESHER] Whale conviction enrichment error: {e}")
 
     async def _sync_consecutive_losses(self, analyses) -> None:
         try:

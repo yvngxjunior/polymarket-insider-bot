@@ -1,4 +1,5 @@
 from collections import deque
+from datetime import datetime
 from bot.config import get_settings
 from bot.database import get_db, TrackedWallet
 from bot.trading.polymarket import PolymarketDataClient
@@ -46,6 +47,11 @@ class WhaleTracker:
 
     FIX WHALE-2 -- is_whale mis a jour en batch a la fin du scan
       au lieu d'une transaction DB par trade individuel.
+      
+    FIX WHALE-4 -- Auto-add whale wallets to tracking
+      Les wallets détectés sont automatiquement ajoutés à la DB s'ils n'existent pas.
+      
+    FIX WHALE-5 -- Return added_count to trigger immediate refresh
     """
 
     def __init__(self, client: PolymarketDataClient):
@@ -56,6 +62,9 @@ class WhaleTracker:
         self._seen_set: set[str] = set()
         # Cache des mots-cles (immutables pour la duree de vie du process)
         self._noise_keywords: list[str] = settings.get_whale_keywords_blacklist()
+        # NEW: Track last auto-add count
+        self.last_added_count = 0
+        
         if self._noise_keywords:
             logger.info(
                 f"[WHALE] Keyword filter active: {len(self._noise_keywords)} keywords"
@@ -95,6 +104,7 @@ class WhaleTracker:
         return any(kw in t for kw in self._noise_keywords)
 
     async def scan(self) -> list[dict]:
+        """Returns (events, added_count) tuple."""
         large_trades = await self.client.get_recent_large_trades(
             min_amount=settings.whale_threshold
         )
@@ -111,6 +121,8 @@ class WhaleTracker:
         # FIX WHALE-2: on collecte les wallets whale du cycle
         # pour un seul batch DB a la fin (au lieu d'une connexion par trade)
         whale_wallets_to_flag: list[str] = []
+        # FIX WHALE-4: wallets à ajouter automatiquement
+        whale_wallets_to_add: dict[str, float] = {}  # {address: amount}
 
         for trade in large_trades:
             key = self._dedup_key(trade)
@@ -147,8 +159,11 @@ class WhaleTracker:
             )
 
             # FIX WHALE-2: accumule les wallets pour le batch update
+            # FIX WHALE-4: accumule aussi pour auto-add
             if wallet:
                 whale_wallets_to_flag.append(wallet)
+                if wallet not in whale_wallets_to_add:
+                    whale_wallets_to_add[wallet] = amount
 
             new_events.append({
                 "wallet":       wallet,
@@ -161,15 +176,48 @@ class WhaleTracker:
                 "title":        title,
             })
 
-        # FIX WHALE-2: une seule transaction DB pour tous les wallets whale du cycle
-        if whale_wallets_to_flag:
+        # FIX WHALE-4: Auto-add whale wallets to DB if not tracked
+        added_count = 0
+        if whale_wallets_to_add:
             try:
                 with get_db() as db:
-                    for wallet_addr in whale_wallets_to_flag:
-                        w = db.get(TrackedWallet, wallet_addr)
-                        if w:
-                            w.is_whale = True
+                    for wallet_addr, amount in whale_wallets_to_add.items():
+                        wallet_lower = wallet_addr.lower()
+                        existing = db.query(TrackedWallet).filter(
+                            TrackedWallet.address == wallet_lower
+                        ).first()
+                        
+                        if not existing:
+                            # Auto-add avec score conservateur
+                            now = datetime.utcnow()
+                            new_wallet = TrackedWallet(
+                                address=wallet_lower,
+                                label=f"Whale {wallet_addr[:10]}",
+                                score=0.70,  # Score initial conservateur
+                                total_trades=0,
+                                win_rate=0.65,
+                                total_profit_usd=amount,
+                                is_active=True,
+                                is_whale=True,
+                                first_seen=now,
+                                last_activity=now,
+                            )
+                            db.add(new_wallet)
+                            added_count += 1
+                            logger.info(f"[WHALE] ✅ Auto-added {wallet_addr[:10]}... (${amount:,.0f})")
+                        else:
+                            # Update is_whale flag
+                            existing.is_whale = True
+                            existing.last_activity = datetime.utcnow()
+                    
+                    db.commit()
+                    
+                if added_count > 0:
+                    logger.info(f"[WHALE] Auto-added {added_count} new whale wallet(s) to tracking")
+                    
             except Exception as e:
-                logger.warning(f"[WHALE] DB batch update failed: {e}")
-
+                logger.warning(f"[WHALE] DB auto-add failed: {e}")
+        
+        # FIX WHALE-5: Store count for external trigger
+        self.last_added_count = added_count
         return new_events

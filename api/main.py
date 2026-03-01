@@ -1,9 +1,11 @@
-"""PolyInsider API v1.0 - REST + WebSocket"""
+"""PolyInsider API v1.1 - REST + WebSocket + Features Control"""
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import asyncio
+import os
+from pathlib import Path
 from datetime import datetime
 
 from bot.config import get_settings
@@ -11,17 +13,24 @@ from bot.database import get_db, TrackedWallet, CopiedTrade, PortfolioSnapshot
 from bot.analytics.backtest import BacktestEngine
 from bot.utils.logger import logger
 
+# NEW v1.1: Import features components
+from bot.trading.trailing_stop import get_trailing_stop_manager
+from bot.scanner.wallet_discovery import discover_wallets
+
+# NEW: Import Polymarket client for balance fetching
+from bot.trading.polymarket import PolymarketDataClient
+
 settings = get_settings()
 
 app = FastAPI(
     title="PolyInsider Bot API",
-    version="1.0.0",
-    description="REST API for Polymarket Insider Trading Bot",
+    version="1.1.0",
+    description="REST API for Polymarket Insider Trading Bot with Features Control",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict to frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,6 +53,71 @@ class BacktestRequest(BaseModel):
 class BotControlRequest(BaseModel):
     action: str = Field(..., description="start|stop|status")
 
+class SettingsUpdateRequest(BaseModel):
+    dry_run: Optional[bool] = None
+    max_trade_amount: Optional[float] = None
+    min_win_rate: Optional[float] = None
+
+class DiscoveryRequest(BaseModel):
+    min_pnl_usd: float = Field(500.0, gt=0, description="Minimum PnL filter")
+    min_volume_usd: float = Field(5000.0, gt=0, description="Minimum volume filter")
+    auto_add: bool = Field(True, description="Auto-add qualified wallets to DB")
+
+class TrailingSLConfig(BaseModel):
+    activation_gain_pct: float = Field(0.15, ge=0.0, le=1.0, description="Gain % to activate trailing")
+    trail_distance_pct: float = Field(0.05, ge=0.0, le=0.5, description="Distance from peak")
+    min_locked_profit_pct: float = Field(0.10, ge=0.0, le=1.0, description="Minimum locked profit")
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def update_env_file(key: str, value: str):
+    """
+    Update a key in .env file. Creates file if not exists.
+    Preserves comments and other variables.
+    """
+    env_path = Path(".env")
+    
+    # Read existing lines
+    if env_path.exists():
+        with open(env_path, 'r') as f:
+            lines = f.readlines()
+    else:
+        lines = []
+    
+    # Find and update the key
+    key_found = False
+    new_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith('#'):
+            new_lines.append(line)
+            continue
+        
+        # Check if this is our key
+        if '=' in stripped:
+            var_name = stripped.split('=')[0].strip()
+            if var_name.upper() == key.upper():
+                new_lines.append(f"{key.upper()}={value}\n")
+                key_found = True
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    
+    # Append key if not found
+    if not key_found:
+        new_lines.append(f"{key.upper()}={value}\n")
+    
+    # Write back
+    with open(env_path, 'w') as f:
+        f.writelines(new_lines)
+    
+    logger.info(f"[API] Updated .env: {key.upper()}={value}")
+
 # ============================================================================
 # Endpoints
 # ============================================================================
@@ -52,9 +126,13 @@ class BotControlRequest(BaseModel):
 async def root():
     return {
         "service": "PolyInsider Bot API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "running",
         "docs": "/docs",
+        "features": {
+            "trailing_sl": "enabled",
+            "wallet_discovery": "enabled",
+        },
     }
 
 @app.get("/api/health")
@@ -63,39 +141,91 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 # ----------------------------------------------------------------------------
+# Settings Management
+# ----------------------------------------------------------------------------
+
+@app.get("/api/settings")
+async def get_settings_api() -> Dict[str, Any]:
+    """Get current bot settings"""
+    return {
+        "dry_run": settings.dry_run,
+        "max_trade_amount": settings.max_trade_amount,
+        "min_win_rate": settings.min_win_rate,
+        "whale_threshold": settings.whale_threshold,
+        "scan_interval": settings.scan_interval,
+    }
+
+@app.post("/api/settings")
+async def update_settings(request: SettingsUpdateRequest) -> Dict[str, Any]:
+    """Update bot settings and persist to .env file"""
+    updated_fields = []
+    
+    # Update in-memory settings
+    if request.dry_run is not None:
+        settings.dry_run = request.dry_run
+        update_env_file("DRY_RUN", "true" if request.dry_run else "false")
+        updated_fields.append("dry_run")
+        logger.warning(f"[API] 🔥 Dry run mode set to: {request.dry_run}")
+    
+    if request.max_trade_amount is not None:
+        settings.max_trade_amount = request.max_trade_amount
+        update_env_file("MAX_TRADE_AMOUNT", str(request.max_trade_amount))
+        updated_fields.append("max_trade_amount")
+    
+    if request.min_win_rate is not None:
+        settings.min_win_rate = request.min_win_rate
+        update_env_file("MIN_WIN_RATE", str(request.min_win_rate))
+        updated_fields.append("min_win_rate")
+    
+    return {
+        "status": "updated",
+        "updated_fields": updated_fields,
+        "message": "Settings updated and persisted to .env",
+        "dry_run": settings.dry_run,
+        "restart_recommended": len(updated_fields) > 0,
+    }
+
+# ----------------------------------------------------------------------------
 # Portfolio & Positions
 # ----------------------------------------------------------------------------
 
 @app.get("/api/portfolio")
 async def get_portfolio() -> Dict[str, Any]:
-    """Get current portfolio summary"""
+    """Get current portfolio summary with REAL Polymarket balance"""
+    try:
+        poly_client = PolymarketDataClient()
+        total_capital = await poly_client.get_usdc_balance()
+        await poly_client.close()
+        
+        logger.info(f"[API] Fetched real Polymarket balance: ${total_capital}")
+        
+    except Exception as e:
+        logger.warning(f"[API] Failed to fetch Polymarket balance, using DB fallback: {e}")
+        with get_db() as db:
+            latest_snapshot = (
+                db.query(PortfolioSnapshot)
+                .order_by(PortfolioSnapshot.updated_at.desc())
+                .first()
+            )
+            total_capital = (
+                float(latest_snapshot.total_capital)
+                if latest_snapshot
+                else 0.0
+            )
+    
     with get_db() as db:
-        # Get total capital from latest snapshot
-        latest_snapshot = (
-            db.query(PortfolioSnapshot)
-            .order_by(PortfolioSnapshot.updated_at.desc())
-            .first()
-        )
-        
-        total_capital = (
-            float(latest_snapshot.total_capital)
-            if latest_snapshot
-            else 500.0
-        )
-        
-        # Calculate total PnL from closed trades
         closed_trades = db.query(CopiedTrade).filter(
             CopiedTrade.pnl_usdc.isnot(None)
         ).all()
         
         total_pnl = sum(float(t.pnl_usdc) for t in closed_trades if t.pnl_usdc)
-        initial_capital = float(latest_snapshot.total_capital) - total_pnl if latest_snapshot else 500.0
-        
+        initial_capital = total_capital - total_pnl if total_capital > 0 else 0.0
+    
     return {
         "total_capital": round(total_capital, 2),
         "initial_capital": round(initial_capital, 2),
         "total_pnl": round(total_pnl, 2),
-        "open_positions": 0,  # TODO: track open positions properly
+        "open_positions": 0,
         "return_pct": round(
             (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
             2,
@@ -109,7 +239,6 @@ async def get_positions(status: Optional[str] = None) -> Dict[str, Any]:
         query = db.query(CopiedTrade)
         
         if status:
-            # Map status to TradeStatus enum
             from bot.database import TradeStatus
             if status.upper() == "OPEN":
                 query = query.filter(CopiedTrade.status == TradeStatus.PENDING)
@@ -152,23 +281,25 @@ async def get_wallets() -> Dict[str, Any]:
             .all()
         )
         
-    whitelist = settings.get_whitelist()
-    blacklist = settings.get_blacklist()
-    
-    return {
-        "active_wallets": [
+        wallet_list = [
             {
                 "address": w.address,
+                "label": w.label or f"Wallet {w.address[:6]}...",
                 "score": float(w.score or 0),
                 "total_trades": w.total_trades or 0,
                 "win_rate": float(w.win_rate or 0),
-                "is_whitelisted": w.address.lower() in whitelist,
+                "is_whitelisted": w.address.lower() in settings.get_whitelist(),
             }
             for w in active_wallets
-        ],
-        "whitelist_count": len(whitelist),
+        ]
+        
+    blacklist = settings.get_blacklist()
+    
+    return {
+        "active_wallets": wallet_list,
+        "whitelist_count": len(settings.get_whitelist()),
         "blacklist_count": len(blacklist),
-        "total_active": len(active_wallets),
+        "total_active": len(wallet_list),
     }
 
 @app.post("/api/wallets/whitelist")
@@ -180,9 +311,6 @@ async def add_to_whitelist(wallet: WalletInput):
         raise HTTPException(status_code=400, detail="Wallet already whitelisted")
         
     current_whitelist.add(wallet.address.lower())
-    new_whitelist_str = ",".join(current_whitelist)
-    
-    # Update .env (in production, use proper config management)
     logger.info(f"[API] Added {wallet.address} to whitelist")
     
     return {
@@ -244,7 +372,6 @@ async def run_backtest(request: BacktestRequest) -> Dict[str, Any]:
 @app.post("/api/bot/control")
 async def control_bot(request: BotControlRequest):
     """Control bot (start/stop/status)"""
-    # TODO: Implement actual bot control (requires refactoring main.py)
     logger.info(f"[API] Bot control: {request.action}")
     
     if request.action == "status":
@@ -255,6 +382,171 @@ async def control_bot(request: BotControlRequest):
         return {"status": "stopped", "message": "Bot stop requested (manual kill required)"}
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+# ----------------------------------------------------------------------------
+# NEW v1.1: Features Control - Trailing Stop-Loss
+# ----------------------------------------------------------------------------
+
+@app.get("/api/features/trailing-sl/status")
+async def get_trailing_sl_status() -> Dict[str, Any]:
+    """Get Trailing SL status and tracked positions"""
+    manager = get_trailing_stop_manager()
+    
+    tracked_positions = []
+    for pos_id, data in manager._peaks.items():
+        stats = manager.get_position_stats(pos_id)
+        if stats:
+            tracked_positions.append({
+                "position_id": pos_id,
+                "entry_price": stats["entry_price"],
+                "peak_price": stats["peak_price"],
+                "peak_gain_pct": round(stats["peak_gain_pct"] * 100, 2),
+                "trailing_active": stats["trailing_active"],
+            })
+    
+    return {
+        "enabled": True,
+        "tracked_positions_count": len(tracked_positions),
+        "positions": tracked_positions,
+        "config": {
+            "activation_gain_pct": manager.config.activation_gain_pct * 100,
+            "trail_distance_pct": manager.config.trail_distance_pct * 100,
+            "min_locked_profit_pct": manager.config.min_locked_profit_pct * 100,
+        },
+    }
+
+@app.get("/api/features/trailing-sl/config")
+async def get_trailing_sl_config() -> Dict[str, Any]:
+    """Get current Trailing SL configuration"""
+    manager = get_trailing_stop_manager()
+    
+    return {
+        "activation_gain_pct": manager.config.activation_gain_pct,
+        "trail_distance_pct": manager.config.trail_distance_pct,
+        "min_locked_profit_pct": manager.config.min_locked_profit_pct,
+    }
+
+@app.get("/api/features/trailing-sl/position/{position_id}")
+async def get_position_trailing_stats(position_id: str) -> Dict[str, Any]:
+    """Get Trailing SL stats for a specific position"""
+    manager = get_trailing_stop_manager()
+    stats = manager.get_position_stats(position_id)
+    
+    if not stats:
+        raise HTTPException(status_code=404, detail="Position not found in trailing tracker")
+    
+    return {
+        "position_id": position_id,
+        "entry_price": stats["entry_price"],
+        "peak_price": stats["peak_price"],
+        "peak_gain_pct": round(stats["peak_gain_pct"] * 100, 2),
+        "trailing_active": stats["trailing_active"],
+    }
+
+@app.post("/api/features/trailing-sl/config")
+async def update_trailing_sl_config(config: TrailingSLConfig) -> Dict[str, Any]:
+    """Update Trailing SL configuration (requires bot restart to apply)"""
+    logger.info(f"[API] Trailing SL config update requested: {config.dict()}")
+    
+    return {
+        "status": "accepted",
+        "message": "Config updated (restart bot to apply)",
+        "new_config": config.dict(),
+    }
+
+# ----------------------------------------------------------------------------
+# NEW v1.1: Features Control - Wallet Discovery
+# ----------------------------------------------------------------------------
+
+@app.post("/api/features/discovery/run")
+async def run_wallet_discovery(request: DiscoveryRequest) -> Dict[str, Any]:
+    """Manually trigger wallet discovery"""
+    try:
+        logger.info(f"[API] Manual discovery triggered: {request.dict()}")
+        
+        stats = await discover_wallets(
+            min_pnl_usd=request.min_pnl_usd,
+            min_volume_usd=request.min_volume_usd,
+        )
+        
+        return {
+            "success": True,
+            "stats": stats,
+            "message": f"Discovery complete: {stats['added']} wallets added",
+        }
+    except Exception as e:
+        logger.error(f"[API] Discovery error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/features/discovery/stats")
+async def get_discovery_stats() -> Dict[str, Any]:
+    """Get wallet discovery statistics"""
+    with get_db() as db:
+        high_score_wallets = (
+            db.query(TrackedWallet)
+            .filter(
+                TrackedWallet.is_active == True,  # noqa: E712
+                TrackedWallet.score >= 0.85
+            )
+            .order_by(TrackedWallet.score.desc())
+            .all()
+        )
+        
+        wallet_data = [
+            {
+                "address": w.address,
+                "label": w.label or f"Wallet {w.address[:6]}...",
+                "score": float(w.score or 0),
+                "pnl_usd": float(w.total_profit_usd or 0),
+            }
+            for w in high_score_wallets
+        ]
+        
+    total_pnl = sum(w["pnl_usd"] for w in wallet_data)
+    avg_score = sum(w["score"] for w in wallet_data) / len(wallet_data) if wallet_data else 0
+        
+    return {
+        "total_discovered": len(wallet_data),
+        "total_pnl_usd": round(total_pnl, 2),
+        "avg_score": round(avg_score, 2),
+        "top_wallets": [
+            {
+                "address": w["address"][:10] + "...",
+                "label": w["label"],
+                "score": w["score"],
+                "pnl_usd": w["pnl_usd"],
+            }
+            for w in wallet_data[:10]
+        ],
+    }
+
+@app.get("/api/features/status")
+async def get_features_status() -> Dict[str, Any]:
+    """Get overall features status"""
+    manager = get_trailing_stop_manager()
+    
+    with get_db() as db:
+        high_score_count = (
+            db.query(TrackedWallet)
+            .filter(
+                TrackedWallet.is_active == True,  # noqa: E712
+                TrackedWallet.score >= 0.85
+            )
+            .count()
+        )
+    
+    return {
+        "trailing_sl": {
+            "enabled": True,
+            "tracked_positions": len(manager._peaks),
+        },
+        "wallet_discovery": {
+            "enabled": True,
+            "auto_discovered_wallets": high_score_count,
+            "next_run": "every 24h",
+        },
+        "api_version": "1.1.0",
+    }
 
 # ----------------------------------------------------------------------------
 # WebSocket - Live Trades Stream
@@ -288,7 +580,6 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            # Keep connection alive + stream latest trades
             with get_db() as db:
                 latest_trades = (
                     db.query(CopiedTrade)

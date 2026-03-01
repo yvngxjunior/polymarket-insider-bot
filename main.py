@@ -1,41 +1,58 @@
 """
-PolyInsider Bot v3.1
-=====================
-Architecture 7 phases + 3 background tasks:
+PolyInsider Bot v3.4 (PHASE 3 + EXECUTOR)
+==========================================
+Architecture 7 phases + 7 background tasks:
   1. Whale scan         — baleines sur nouveaux marchés
+  1.5 Whale Exit Monitor — track REDEEM/SELL from whales [v3.3]
   2. Convergence scan   — plusieurs insiders sur même marché
   3. Insider copy       — copy trading wallets scorés
+  3.5 Hot Market Detection — explosive volume + whale clustering [PHASE 3]
   4. Arbitrage scan     — Polymarket vs Kalshi             [périodique]
   5. Market scan        — 5 000+ marchés arb interne       [périodique]
   6. LLM analysis       — GPT-4o-mini + RAG actualités     [périodique, optionnel]
   7. Performance report — win rate / PnL / trades          [périodique]
   └ WalletRefresher    — refresh + discovery wallets      [background, 60min]
+                         PHASE 2: + ActivityAnalyzer for enhanced scoring
   └ ExitManager        — TP1(50%) / TP2 / SL / durée max  [background, 60s]
   └ HealthMonitor      — silence detection + alerte Telegram [background, 5min]
+  └ FeaturesManager    — Trailing SL + Auto Discovery      [background]
+  └ WhaleExitMonitor   — track whale exits + alerts       [background, 5min] [v3.3]
+  └ HotMarketDetector  — viral markets early detection    [main loop, 10min] [PHASE 3]
+  └ TradeExecutor      — auto-execute whale copy trades   [background, 1s] [v3.4] 🆕
 
-v2.8 fixes:
-  - FIX MAIN-2/3   float(None) crash + refresher.stop() manquant
-  - FIX CMD-1      settings mutation Pydantic v2
-  - FIX INSIDER-4  get_new_trades() timeout par wallet
-  - IMPROV-8       process_new_trade enveloppé dans try/except
+v3.4 NEW FEATURES:
+  ✨ AUTO-TRADING EXECUTOR — Automated trade execution with dexorynlabs-inspired safety
+     - DRY-RUN mode: Test without real money
+     - Balance checks: Verify before every trade
+     - Position sizing: Cap at 40% of capital per position
+     - Safety limits: Daily loss ($3), hourly trades (1/h), daily trades (3/day)
+     - Whale filters: Only copy score ≥80%, conviction ≥75%, trade size ≥$1000
+     - Retry logic: 3x with abort on funding errors
+     - Graceful shutdown: Safe CTRL+C handling
 
-v2.9 fixes:
-  - FIX CONV-3     convergence boost x1.5 mort → is_convergence passé à evaluate()
-  - FIX CONV-4     fenêtre détection basée sur now() au lieu de timestamp API
-  - FIX RISK-6     INSERT portfolio_snapshot jamais commitié
-  - FIX RISK-7     total_capital hardcodé 500 → settings.initial_capital
-  - FIX FILTER-1   rate-limit query status case-sensitive
+v3.3 NEW FEATURES:
+  ✨ WHALE EXIT TRACKING — Monitor when whales REDEEM/SELL positions
+     - Passive: Analyze exit patterns for conviction scoring
+     - Active: Alert when whale exits a market you hold
+     - Optional: Auto-exit on whale SELL signal (risky, disabled by default)
 
-v3.0 fixes (audit lot 1):
-  - FIX MAIN-4     performance_tracker.record_trade bare except → logger.warning
-  - FIX MAIN-5     convergence.process_trade logger.debug → logger.warning
-  - FIX MAIN-6     _open_positions accès privé → open_positions_count() public
-  - FIX MAIN-7     aiohttp.ClientSession LLM recréé chaque cycle → session unique
+PHASE 2 NEW FEATURES:
+  ✨ COMPLETE /activity API — Capture ALL event types (TRADE, REDEEM, SPLIT, MERGE)
+  ✨ ACCURATE WIN RATES — Calculate true win rates using REDEEM events
+  ✨ CONVICTION SCORING — Enrich whale scores based on exit behavior patterns
+  ✨ ENTRY TIMING — Score wallets on early vs late market entry
 
-v3.1 fixes (pré-SaaS):
-  - FIX ENGINE-9   _http_session partagée dans TradingEngine (plus de new session/appel)
-  - FIX DB-3       migrations _SAFE_MIGRATIONS sur PostgreSQL (IF NOT EXISTS)
-  - FIX MAIN-8     engine.close() dans asyncio.gather shutdown
+PHASE 3 NEW FEATURES:
+  ✨ HOT MARKET DETECTION — Detect explosive volume spikes + whale clustering
+     - Volume Spike: 3x+ normal volume in 1-2h window
+     - Whale Cluster: 3+ tracked whales entering same market
+     - Momentum: 10%+ price change in 1h
+     - Fast-track copy: Optional immediate copy on hot signals
+
+v3.2 features:
+  ✨ TRAILING STOP-LOSS — Dynamic SL that follows price (activates at +15%)
+  ✨ AUTO WALLET DISCOVERY — Scrapes Polymarket leaderboard every 24h
+  ✨ AUTO-REFRESH AFTER WHALE ADD — Immediate scanner refresh when whales auto-added
 """
 import asyncio
 import signal
@@ -48,6 +65,9 @@ from bot.database import get_db, TrackedWallet, init_db
 from bot.trading.polymarket import PolymarketDataClient
 from bot.scanner.insider import InsiderScanner, _safe_float
 from bot.scanner.whale import WhaleTracker
+from bot.scanner.whale_exit_monitor import WhaleExitMonitor
+from bot.scanner.activity_analyzer import ActivityAnalyzer
+from bot.scanner.hot_market_detector import HotMarketDetector
 from bot.scanner.wallet_refresher import WalletRefresher
 from bot.scanner.wallet_scanner import WalletScanner
 from bot.scanner.convergence import ConvergenceDetector
@@ -59,12 +79,14 @@ from bot.trading.position_manager import PositionManager
 from bot.trading.sizing import PositionSizer
 from bot.trading.filters import ConvictionFilter
 from bot.trading.exit_manager import ExitManager
+from bot.trading.executor import TradeExecutor, start_executor, stop_executor  # v3.4 🆕
 from bot.notifications.telegram import TelegramNotifier
 from bot.notifications.commands import BotCommandHandler
 from bot.notifications.health import HealthMonitor
 from bot.analytics.performance import PerformanceTracker
 from bot.ai.llm_agent import LLMAgent
 from bot.utils.logger import logger
+from bot.features_integration import get_features_manager
 
 settings = get_settings()
 
@@ -135,7 +157,6 @@ async def process_new_trade(
                     "avg_price":    conv_signal.avg_price,
                 })
         except Exception as e:
-            # FIX MAIN-5: warning au lieu de debug — composant critique
             logger.warning(f"[CONV] process_trade error: {e}")
 
     f = conv_filter.evaluate(
@@ -193,7 +214,6 @@ async def process_new_trade(
             )
         except Exception as e:
             logger.debug(f"[POS] register error: {e}")
-        # FIX MAIN-4: bare except → logger.warning pour tracer les échecs
         try:
             await performance_tracker.record_trade(copied_trade)
         except Exception as e:
@@ -202,10 +222,73 @@ async def process_new_trade(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+async def whale_exit_monitor_loop(
+    whale_exit_monitor: WhaleExitMonitor,
+    notifier: TelegramNotifier,
+    check_interval_sec: int = 300,
+) -> None:
+    """Background task to monitor whale exits."""
+    logger.info(f"[WHALE_EXIT] Monitor started — check every {check_interval_sec}s")
+    
+    while True:
+        try:
+            await asyncio.sleep(check_interval_sec)
+            
+            if not settings.whale_exit_tracking:
+                continue
+            
+            with get_db() as db:
+                whales = db.query(TrackedWallet).filter(
+                    TrackedWallet.is_whale == True,
+                    TrackedWallet.is_active == True,
+                ).all()
+                
+                whale_addresses = [w.address for w in whales]
+            
+            if not whale_addresses:
+                continue
+            
+            exit_events = await whale_exit_monitor.check_whale_exits(
+                whale_addresses=whale_addresses,
+                since_hours=settings.whale_exit_window_hours,
+            )
+            
+            if not exit_events:
+                continue
+            
+            for event in exit_events:
+                logger.info(
+                    f"[WHALE_EXIT] {event.wallet[:10]}... "
+                    f"{event.exit_type} ${event.amount_usdc:,.0f} @ {event.price:.2f} | "
+                    f"{event.title[:45]}"
+                )
+                
+                if event.matches_our_position and settings.whale_exit_alert:
+                    await notifier.send(
+                        f"🚨 <b>WHALE EXIT ALERT</b>\n\n"
+                        f"Whale <code>{event.wallet[:10]}...</code> "
+                        f"just {event.exit_type.lower()}ed a position you hold:\n\n"
+                        f"<b>{event.title}</b>\n\n"
+                        f"Exit type: <b>{event.exit_type}</b>\n"
+                        f"Price: <code>{event.price:.2f}</code>\n"
+                        f"Amount: <code>${event.amount_usdc:,.0f}</code>\n\n"
+                        f"💡 <i>Consider reviewing this position. "
+                        f"The whale may have information you don't.</i>\n\n"
+                        f"⚠️ Auto-exit is disabled for safety. Manual review recommended."
+                    )
+        
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[WHALE_EXIT] Monitor loop error: {e}")
+
+
+# ────────────────────────────────────────────────────────────────────────────
 async def main_loop(
     scanner: InsiderScanner,
     whale_tracker: WhaleTracker,
     convergence_detector: ConvergenceDetector,
+    hot_market_detector: HotMarketDetector,
     arbitrage_scanner: ArbitrageScanner,
     market_scanner: MarketScanner,
     llm_agent: LLMAgent,
@@ -218,12 +301,13 @@ async def main_loop(
     conv_filter: ConvictionFilter,
     sizer: PositionSizer,
     health_monitor: HealthMonitor,
-    # FIX MAIN-7: session aiohttp LLM créée une seule fois, injectée ici
     llm_session: aiohttp.ClientSession,
+    refresher: WalletRefresher,
 ) -> None:
     logger.info(f"Main loop started. Interval: {settings.scan_interval}s")
 
     WHALE_EVERY  = 4
+    HOT_MARKET_EVERY = 10
     ARB_EVERY    = 20
     MARKET_EVERY = settings.market_scan_every_n_loops
     LLM_EVERY    = settings.llm_scan_every_n_loops
@@ -235,7 +319,6 @@ async def main_loop(
             loop_count += 1
             health_monitor.record_activity()
 
-            # Phase 1 — Whale scan (throttlé: toutes les WHALE_EVERY boucles)
             if loop_count % WHALE_EVERY == 0:
                 for event in await whale_tracker.scan():
                     await notifier.notify_whale_event(
@@ -245,12 +328,18 @@ async def main_loop(
                         side=event["side"],
                         price=event["price"],
                     )
+                
+                if whale_tracker.last_added_count > 0:
+                    logger.info(
+                        f"[MAIN] {whale_tracker.last_added_count} new whales auto-added — "
+                        f"triggering scanner refresh..."
+                    )
+                    refresher.trigger_refresh()
 
-            # Phase 2+3 — Insider copy trading + convergence par trade
             with get_db() as db:
                 wallets = (
                     db.query(TrackedWallet)
-                    .filter(TrackedWallet.is_active == True)  # noqa: E712
+                    .filter(TrackedWallet.is_active == True)
                     .order_by(TrackedWallet.score.desc())
                     .all()
                 )
@@ -306,13 +395,25 @@ async def main_loop(
                             f"({addr[:10]} {trade.get('asset', '?')[:12]}): {e}"
                         )
 
-            # Phase 4 — Arbitrage cross-platform
+            if loop_count % HOT_MARKET_EVERY == 0:
+                try:
+                    hot_signals = await hot_market_detector.scan(
+                        lookback_hours=2,
+                        min_volume_multiplier=3.0,
+                        min_whale_count=2,
+                    )
+                    
+                    for signal in hot_signals[:3]:
+                        logger.info(f"[HOT_MARKET] {signal}")
+                        await notifier.notify_hot_market(signal)
+                except Exception as e:
+                    logger.debug(f"[HOT_MARKET] Scan error: {e}")
+
             if loop_count % ARB_EVERY == 0:
                 for opp in (await arbitrage_scanner.scan())[:5]:
                     logger.info(f"[ARB] +{opp.profit_pct:.1%} | {opp.direction} | {opp.poly_question[:45]}")
                     await notifier.notify_arbitrage(opp)
 
-            # Phase 5 — Market scan haute échelle
             if loop_count % MARKET_EVERY == 0:
                 sigs = await market_scanner.scan_all(max_markets=settings.market_scan_max_markets)
                 arbs = [s for s in sigs if s.signal_type == "INTERNAL_ARB"]
@@ -322,8 +423,6 @@ async def main_loop(
                         f"{arbs[0].question[:50]} (spread={arbs[0].spread:.3f})"
                     )
 
-            # Phase 6 — LLM analysis
-            # FIX MAIN-7: réutilise llm_session (créée une fois dans run())
             if loop_count % LLM_EVERY == 0 and llm_agent.is_enabled():
                 try:
                     async with llm_session.get(
@@ -347,8 +446,6 @@ async def main_loop(
                 except Exception as e:
                     logger.debug(f"[LLM] Scan cycle error: {e}")
 
-            # Phase 7 — Performance report
-            # FIX MAIN-6: open_positions_count() public au lieu de _open_positions privé
             if loop_count % PERF_EVERY == 0:
                 try:
                     stats = await performance_tracker.get_summary()
@@ -372,11 +469,19 @@ async def main_loop(
 # ────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     logger.info("=" * 62)
-    logger.info("  PolyInsider Bot v3.1")
-    logger.info("  Copy · Whale · Conv · Arb · Scanner · LLM · ExitMgr")
+    logger.info("  PolyInsider Bot v3.4 (PHASE 3 + EXECUTOR)")
+    logger.info("  Copy · Whale · WhaleExit · Conv · HotMarket · Arb · LLM · Executor")
     logger.info(f"  Mode : {'DRY RUN 🟡' if settings.dry_run else 'LIVE 🟢'}")
     logger.info(f"  LLM  : {'ENABLED 🧠' if settings.llm_enabled else 'disabled'}")
     logger.info(f"  Arb  : {'ENABLED ⚡' if settings.arb_enabled else 'disabled'}")
+    # v3.4: Auto-trading executor
+    if settings.auto_trading_enabled:
+        logger.info(f"  ✨ Auto-Trading Executor: {'DRY-RUN 🎭' if settings.executor_dry_run else 'LIVE 💰'}")
+        logger.info(f"     └─ Limits: ${settings.max_daily_loss_usd}/day, {settings.max_trades_per_day}/day, {settings.max_trades_per_hour}/hour")
+        logger.info(f"     └─ Filters: score≥{settings.executor_min_whale_score:.0%}, conviction≥{settings.executor_min_conviction:.0%}")
+    else:
+        logger.info("  Auto-Trading Executor:    OFF (set AUTO_TRADING_ENABLED=true to enable)")
+    
     logger.info("  Losing streak protection: ON 🛡️")
     logger.info("  Entry timing filter:      ON ⏱️")
     logger.info("  Partial TP sell (50/50):  ON 💰")
@@ -385,6 +490,23 @@ async def run() -> None:
     logger.info("  Capital persistence:      ON 💾")
     logger.info("  Sizer capital sync:       ON 🔄")
     logger.info("  Convergence boost (x1.5): ON 🔥")
+    logger.info("  ✨ Trailing Stop-Loss:     ON 📈 (activates @ +15% gain)")
+    logger.info("  ✨ Auto Wallet Discovery:  ON 🔍 (every 24h)")
+    logger.info("  ✨ Auto-Refresh on Whale:  ON ⚡ (immediate scanner update)")
+    
+    if settings.whale_exit_tracking:
+        logger.info(f"  ✨ Whale Exit Tracking:    ON 🚪 (window={settings.whale_exit_window_hours}h)")
+        if settings.whale_exit_alert:
+            logger.info("     └─ Exit Alerts: ENABLED 🔔")
+        if settings.whale_auto_exit:
+            logger.info("     └─ Auto-Exit: Config enabled but NOT IMPLEMENTED (too risky)")
+    else:
+        logger.info("  Whale Exit Tracking:      OFF")
+    
+    logger.info("  ✨ Activity Analytics:     ON 📊 (accurate win rates via REDEEM)")
+    logger.info("  ✨ Conviction Scoring:     ON 🎯 (whale exit pattern analysis)")
+    logger.info("  ✨ Hot Market Detection:   ON 🔥 (explosive volume + whale clustering)")
+    
     if settings.tiered_multipliers:
         logger.info(f"  Tiered multipliers:       ON 📐 ({settings.tiered_multipliers[:40]})")
     else:
@@ -403,6 +525,9 @@ async def run() -> None:
     engine               = TradingEngine(risk_manager=risk_manager)
     scanner              = InsiderScanner(client=client)
     whale_tracker        = WhaleTracker(client=client)
+    whale_exit_monitor   = WhaleExitMonitor(client=client)
+    activity_analyzer    = ActivityAnalyzer(client=client)
+    hot_market_detector  = HotMarketDetector(client=client)
     convergence_detector = ConvergenceDetector(client=client)
     arbitrage_scanner    = ArbitrageScanner(min_profit_pct=settings.arb_min_profit_pct)
     market_scanner       = MarketScanner(max_concurrent=8)
@@ -437,11 +562,19 @@ async def run() -> None:
         client=client,
         insider_scanner=scanner,
     )
+    
     refresher = WalletRefresher(
         scanner=scanner,
         notifier=notifier,
         interval_minutes=60,
         wallet_scanner=wallet_scanner,
+        activity_analyzer=activity_analyzer,
+        whale_exit_monitor=whale_exit_monitor,
+    )
+    
+    features_manager = get_features_manager(
+        enable_trailing_sl=True,
+        enable_wallet_discovery=True,
     )
 
     await notifier.notify_startup(dry_run=settings.dry_run)
@@ -449,7 +582,7 @@ async def run() -> None:
     stop_event = asyncio.Event()
     loop       = asyncio.get_running_loop()
 
-    def _on_signal(signum, frame) -> None:  # noqa: ARG001
+    def _on_signal(signum, frame) -> None:
         logger.info("Shutdown signal received — stopping gracefully...")
         loop.call_soon_threadsafe(stop_event.set)
 
@@ -460,18 +593,36 @@ async def run() -> None:
     await refresher.start()
     await exit_manager.start()
     await health_monitor.start()
+    await features_manager.start()
+    
     try:
         await cmd_handler.start_polling()
     except Exception as e:
         logger.warning(f"[COMMANDS] Could not start polling (token invalid?): {e}")
 
-    # FIX MAIN-7: session aiohttp LLM créée une fois ici, partagée sur toute la durée de vie
     llm_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+
+    # v3.3: Start whale exit monitor
+    whale_exit_task = None
+    if settings.whale_exit_tracking:
+        whale_exit_task = asyncio.create_task(
+            whale_exit_monitor_loop(
+                whale_exit_monitor=whale_exit_monitor,
+                notifier=notifier,
+                check_interval_sec=300,
+            )
+        )
+
+    # v3.4: Start trade executor 🆕
+    executor_task = None
+    if settings.auto_trading_enabled:
+        executor_task = asyncio.create_task(start_executor())
 
     main_task = asyncio.create_task(
         main_loop(
             scanner=scanner, whale_tracker=whale_tracker,
             convergence_detector=convergence_detector,
+            hot_market_detector=hot_market_detector,
             arbitrage_scanner=arbitrage_scanner, market_scanner=market_scanner,
             llm_agent=llm_agent, engine=engine, notifier=notifier, client=client,
             risk_manager=risk_manager, position_manager=position_manager,
@@ -479,21 +630,40 @@ async def run() -> None:
             conv_filter=conv_filter, sizer=sizer,
             health_monitor=health_monitor,
             llm_session=llm_session,
+            refresher=refresher,
         )
     )
 
     await stop_event.wait()
     main_task.cancel()
+    if whale_exit_task:
+        whale_exit_task.cancel()
+    if executor_task:
+        stop_executor()  # Graceful stop
+        executor_task.cancel()
+    
     try:
         await main_task
     except asyncio.CancelledError:
         pass
+    
+    if whale_exit_task:
+        try:
+            await whale_exit_task
+        except asyncio.CancelledError:
+            pass
+    
+    if executor_task:
+        try:
+            await executor_task
+        except asyncio.CancelledError:
+            pass
 
-    # FIX MAIN-8: engine.close() ajouté pour fermer la session HTTP partagée
     await asyncio.gather(
         refresher.stop(),
         exit_manager.stop(),
         health_monitor.stop(),
+        features_manager.stop(),
         cmd_handler.stop(),
         client.close(),
         engine.close(),
