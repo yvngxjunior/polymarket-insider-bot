@@ -3,6 +3,7 @@ from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from bot.config import get_settings
+from bot.utils.logger import logger
 
 settings = get_settings()
 
@@ -165,3 +166,40 @@ class PolymarketDataClient:
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, list) else data.get("leaderboard", data.get("data", []))
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def get_usdc_balance(self) -> float:
+        """
+        NEW: Get USDC balance using py-clob-client.
+        Requires API credentials to be configured in settings.
+        Returns balance as float, or 0.0 if unable to fetch.
+        """
+        try:
+            # Import py-clob-client dynamically to avoid breaking if not installed
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import AssetType
+            
+            # Initialize CLOB client with credentials
+            client = ClobClient(
+                host=settings.polymarket_clob_host,
+                key=settings.private_key,
+                chain_id=settings.chain_id,
+                signature_type=settings.signature_type,
+                funder=settings.funder_address if hasattr(settings, 'funder_address') else None,
+            )
+            
+            # Get balance for COLLATERAL (USDC)
+            balance_response = await client.get_balance_allowance(
+                asset_type=AssetType.COLLATERAL
+            )
+            
+            balance = float(balance_response.get('balance', 0))
+            logger.info(f"[PolymarketClient] Fetched USDC balance: ${balance}")
+            return balance
+            
+        except ImportError:
+            logger.warning("[PolymarketClient] py-clob-client not installed, cannot fetch balance")
+            return 0.0
+        except Exception as e:
+            logger.error(f"[PolymarketClient] Failed to fetch USDC balance: {e}")
+            return 0.0
