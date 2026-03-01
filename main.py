@@ -214,13 +214,17 @@ async def process_new_trade(
 async def whale_exit_monitor_loop(
     whale_exit_monitor: WhaleExitMonitor,
     notifier: TelegramNotifier,
-    exit_manager: ExitManager,
     check_interval_sec: int = 300,  # 5 minutes
 ) -> None:
     """Background task to monitor whale exits.
     
     Checks tracked whales for REDEEM/SELL events every 5 minutes.
     Sends alerts when whales exit markets we're holding.
+    
+    Note: WHALE_AUTO_EXIT is intentionally not implemented here.
+    Auto-closing positions based on whale exits is too risky and could
+    lead to losses if the whale exits for reasons unrelated to market outcome.
+    Manual review via Telegram alerts is the recommended approach.
     """
     logger.info(f"[WHALE_EXIT] Monitor started — check every {check_interval_sec}s")
     
@@ -271,18 +275,10 @@ async def whale_exit_monitor_loop(
                         f"Exit type: <b>{event.exit_type}</b>\n"
                         f"Price: <code>{event.price:.2f}</code>\n"
                         f"Amount: <code>${event.amount_usdc:,.0f}</code>\n\n"
-                        f"💡 Consider exiting this position."
+                        f"💡 <i>Consider reviewing this position. "
+                        f"The whale may have information you don't.</i>\n\n"
+                        f"⚠️ Auto-exit is disabled for safety. Manual review recommended."
                     )
-                    
-                    # Optional: Auto-exit (DANGEROUS - disabled by default)
-                    if settings.whale_auto_exit and event.position_id:
-                        logger.warning(
-                            f"[WHALE_EXIT] ⚠️ Auto-exit triggered for position #{event.position_id}"
-                        )
-                        await exit_manager.force_close_position(
-                            position_id=event.position_id,
-                            reason="whale_exit_signal",
-                        )
         
         except asyncio.CancelledError:
             raise
@@ -490,7 +486,7 @@ async def run() -> None:
         if settings.whale_exit_alert:
             logger.info("     └─ Exit Alerts: ENABLED 🔔")
         if settings.whale_auto_exit:
-            logger.info("     └─ Auto-Exit: ENABLED ⚠️ (RISKY!)")
+            logger.info("     └─ Auto-Exit: Config enabled but NOT IMPLEMENTED (too risky)")
     else:
         logger.info("  Whale Exit Tracking:      OFF")
     
@@ -591,7 +587,6 @@ async def run() -> None:
             whale_exit_monitor_loop(
                 whale_exit_monitor=whale_exit_monitor,
                 notifier=notifier,
-                exit_manager=exit_manager,
                 check_interval_sec=300,  # 5 minutes
             )
         )
