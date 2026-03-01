@@ -171,7 +171,11 @@ class PolymarketDataClient:
     async def get_usdc_balance(self) -> float:
         """
         NEW: Get USDC balance using py-clob-client.
-        Requires API credentials to be configured in settings.
+        Requires API credentials configured in .env:
+        - PRIVATE_KEY
+        - PROXY_WALLET
+        - POLYMARKET_HOST
+        - CHAIN_ID
         Returns balance as float, or 0.0 if unable to fetch.
         """
         try:
@@ -179,13 +183,13 @@ class PolymarketDataClient:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import AssetType
             
-            # Initialize CLOB client with credentials
+            # Initialize CLOB client with credentials from settings
             client = ClobClient(
-                host=settings.polymarket_clob_host,
+                host=settings.polymarket_host,
                 key=settings.private_key,
                 chain_id=settings.chain_id,
-                signature_type=settings.signature_type,
-                funder=settings.funder_address if hasattr(settings, 'funder_address') else None,
+                signature_type=0,  # EOA signature
+                funder=settings.proxy_wallet,  # FIX: Use proxy_wallet from settings
             )
             
             # Get balance for COLLATERAL (USDC)
