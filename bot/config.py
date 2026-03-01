@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     scan_interval: int = Field(default=3, ge=1, le=60)
     max_trade_amount: float = Field(default=50.0, ge=1.0)
     min_win_rate: float = Field(default=0.70, ge=0.0, le=1.0)
-    min_trades_count: int = Field(default=15, ge=1)
+    min_trades_count: int = Field(default=15, ge=0, description="Allow 0 for leaderboard wallets without trade history in DB")
     whale_threshold: float = Field(default=500.0, ge=50.0)
     dry_run: bool = True
 
